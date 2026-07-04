@@ -462,6 +462,9 @@ async function requestWithTimeout(
             resolve(null);
           }
         }, 100);
+        // unref so this polling interval cannot keep the event loop (and thus
+        // the process) alive while awaiting a client response (up to 600s).
+        cancelTimer.unref?.();
       }),
     );
   }

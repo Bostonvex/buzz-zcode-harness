@@ -1,6 +1,27 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 *.tsbuildinfo
+
+# Test artifacts
 coverage/
 .vitest-cache/
+
+# Logs
 *.log
+
+# Environment files (the project reads env vars; never commit secrets)
+.env
+.env.*
+!.env.example
+
+# OS / editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# npm pack output
+*.tgz

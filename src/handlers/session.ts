@@ -280,7 +280,6 @@ export async function prompt(
   const turn: PendingTurn = {
     zcodeSid,
     cancelled: false,
-    permResponses: new Map(),
   };
   server.pendingTurns.set(requestId, turn);
 

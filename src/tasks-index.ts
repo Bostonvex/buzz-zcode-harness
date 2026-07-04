@@ -41,10 +41,11 @@ let DatabaseSyncCtor:
 async function loadSqlite() {
   if (DatabaseSyncCtor !== undefined) return DatabaseSyncCtor;
   try {
-    // node:sqlite ships with Node ≥ 22; the type isn't in @types/node for 20.
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-expect-error - node:sqlite types unavailable on older @types/node
-    const mod = (await import("node:sqlite")) as { DatabaseSync: unknown };
+    // node:sqlite ships with Node ≥ 22. Cast through unknown so this compiles
+    // even if @types/node lags behind the runtime module.
+    const mod = (await import("node:sqlite")) as unknown as {
+      DatabaseSync: unknown;
+    };
     DatabaseSyncCtor = mod.DatabaseSync as never;
   } catch {
     DatabaseSyncCtor = null; // Node < 22 or sqlite unavailable

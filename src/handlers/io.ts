@@ -59,9 +59,11 @@ export function sendAvailableCommandsDeferred(
   sessionId: string,
   commands: ReadonlyArray<{ name: string; description: string }>,
 ): void {
-  setTimeout(() => {
+  const t = setTimeout(() => {
     void sendAvailableCommands(cx, sessionId, commands);
   }, 50);
+  // unref so shutdown is not held up by this deferred notification.
+  t.unref?.();
 }
 
 /** Throw a JSON-RPC error from a handler (the SDK converts it to an error response). */

@@ -270,7 +270,6 @@ describe("elicitation form: AskUserQuestion", () => {
   });
 
   it("parse maps answers back by question text", () => {
-    const form = buildAskUserElicitationForm(baseParams, "acp_1");
     const answers = parseAskUserElicitationResponse(
       { action: "accept", content: { q_0: "Red" } },
       baseParams,

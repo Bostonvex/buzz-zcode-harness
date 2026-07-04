@@ -30,8 +30,6 @@ export interface ClientCapabilities {
 export interface PendingTurn {
   zcodeSid: string;
   cancelled: boolean;
-  /** Client responses to server→client requests, keyed by ACP request id. */
-  permResponses: Map<number, unknown>;
 }
 
 export class ZcodeAcpServer {

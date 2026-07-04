@@ -1,5 +1,8 @@
 # zcode-acp-server
 
+[![CI](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 A standalone [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) server that bridges the headless **ZCode** app-server to ACP-compatible editors such as [Zed](https://zed.dev) and JetBrains IDEs.
 
 The server launches the ZCode headless app-server (`zcode app-server --stdio`) as a subprocess, translates its internal event stream into ACP `session/update` notifications, and bridges ZCode's interaction channel to ACP — preferring `elicitation/create` when the client supports it, and falling back to `session/request_permission` otherwise — so an editor gets a first-class, native coding-agent experience.
@@ -10,7 +13,8 @@ Early in-development. Core scaffolding is in place; features are landing increme
 
 ## Requirements
 
-- Node.js ≥ 18.17 (uses `node:sqlite` probe for the bundled runtime; the ZCode CLI itself requires Node ≥ 22)
+- **Node.js ≥ 22** (the bridge uses `node:sqlite` for tasks-index sync; the
+  ZCode CLI runtime also requires Node ≥ 22)
 - The `zcode` CLI installed and on `PATH` (or pointed at via `ZCODE_BIN`)
 - ZCode credentials at `~/.zcode/v2/config.json` (created by the ZCode app)
 
@@ -105,6 +109,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 - [Protocol](docs/PROTOCOL.md) — ZCode JSON-RPC protocol details
 - [Development](docs/DEVELOPMENT.md) — local development, debugging, adding extension methods
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — common-issue troubleshooting
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
+code style, commit conventions, and the PR checklist. Notable changes are
+recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
