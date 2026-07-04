@@ -75,6 +75,16 @@ export async function newSession(
   server.sessionMap.set(sid, sid);
   log(`session/new → ${sid}`);
 
+  // Sync to the App's tasks-index.sqlite so the App UI shows this session.
+  // Best-effort; failures are logged inside upsertSessionTask and swallowed.
+  const { upsertSessionTask } = await import("../tasks-index.js");
+  void upsertSessionTask({
+    workspaceKey: cwd,
+    taskId: sid,
+    title: session.title ?? "",
+    traceId: session.traceId,
+  });
+
   void sendAvailableCommandsDeferred(server, sid);
   return {
     sessionId: sid,
@@ -313,6 +323,22 @@ export async function prompt(
       chunkMsgId,
       turn,
     );
+
+    // Session title: set once on the first end_turn of this session. The title
+    // is the first prompt text (truncated). Subsequent turns never overwrite it
+    // (set-once gate), and the App's title_overridden flag always wins.
+    if (result.stopReason === "end_turn" && !server.sessionTitles.has(params.sessionId)) {
+      const title = text.slice(0, 80);
+      server.sessionTitles.set(params.sessionId, title);
+      const { updateSessionTitle } = await import("../tasks-index.js");
+      void updateSessionTitle(zcodeSid, title);
+      await sendSessionUpdate(cx, params.sessionId, {
+        sessionUpdate: "session_info_update",
+        title,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     return result;
   } finally {
     backend.unregisterEventListener(zcodeSid);

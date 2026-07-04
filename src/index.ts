@@ -51,6 +51,21 @@ async function main(): Promise<void> {
 
   log(`starting ${AGENT_INFO.name} ${AGENT_INFO.version}, ACP protocol v${acp.PROTOCOL_VERSION}`);
 
+  // Graceful shutdown: ensure the zcode subprocess group is reaped on signal
+  // or stdin close (so no orphans survive). Zed force-kills the bridge on
+  // reconnect; without this the SIGTERM handler wouldn't run close().
+  let shuttingDown = false;
+  const shutdown = async (sig: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`received ${sig}, shutting down`);
+    if (server.backend) await server.backend.close();
+    process.exit(0);
+  };
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+    process.on(sig, () => void shutdown(sig));
+  }
+
   acp
     .agent({ name: AGENT_INFO.name })
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
