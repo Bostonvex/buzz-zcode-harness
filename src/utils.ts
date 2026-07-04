@@ -1,0 +1,49 @@
+/**
+ * Shared utilities: logging and project-wide constants.
+ *
+ * Logging goes to stderr so it never corrupts the stdout ACP protocol stream.
+ */
+
+import path from "node:path";
+import process from "node:process";
+
+/** ACP protocol version this server speaks. */
+export const PROTOCOL_VERSION = 1;
+
+/** Agent identity advertised in the initialize response. */
+export const AGENT_INFO = {
+  name: "zcode-acp-server",
+  title: "ZCode",
+  version: "0.1.0",
+} as const;
+
+/** Path to the ZCode v2 config (credentials + provider/model metadata). */
+export const ZCODE_CREDS_PATH = path.join(
+  process.env.HOME || process.env.USERPROFILE || "~",
+  ".zcode",
+  "v2",
+  "config.json",
+);
+
+/**
+ * Slash commands surfaced to the editor. Each maps to a ZCode session method
+ * that the server forwards when the user types the command.
+ */
+export const SLASH_COMMANDS = [
+  { name: "/compact", description: "Compact conversation history" },
+  { name: "/goal", description: "Set or show the session goal" },
+  { name: "/fork", description: "Fork the session at the latest checkpoint" },
+  { name: "/rewind", description: "Rewind to a checkpoint" },
+  { name: "/steer", description: "Inject steering context mid-turn" },
+  { name: "/model", description: "Switch the active model" },
+  { name: "/mode", description: "Switch the session mode (plan/build/edit/yolo)" },
+  { name: "/thought", description: "Set the thought level (max/high/nothink)" },
+] as const;
+
+/**
+ * Log a message to stderr with a stable prefix. Never use console.log —
+ * stdout is reserved for the ACP JSON-RPC stream.
+ */
+export function log(msg: string): void {
+  process.stderr.write(`[zcode-acp] ${msg}\n`);
+}
