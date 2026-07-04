@@ -1,11 +1,11 @@
 /**
  * ZCode credential and environment handling.
  *
- * Vendored from `shared/credentials.py` so this package stays self-contained
- * (no dependency on the rest of the monorepo). The ZCode desktop app stores
- * provider credentials in `~/.zcode/v2/config.json`; GUI-launched processes
- * don't inherit shell env vars, so we read the config and inject the active
- * provider's settings into the subprocess environment.
+ * Vendored from the reference Python implementation so this package stays
+ * self-contained. The ZCode desktop app stores provider credentials in
+ * `~/.zcode/v2/config.json`; GUI-launched processes don't inherit shell env
+ * vars, so we read the config and inject the active provider's settings into
+ * the subprocess environment.
  */
 
 import { readFileSync } from "node:fs";

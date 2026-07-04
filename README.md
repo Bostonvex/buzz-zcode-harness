@@ -21,12 +21,15 @@ Early in-development. Core scaffolding is in place; features are landing increme
 ## Install
 
 ```bash
-# from this repo
+git clone <repo-url>
+cd zcode-acp-server
 pnpm install
 pnpm build
 ```
 
-The compiled entry point is `dist/index.js`. It is also exposed as the `zcode-acp-server` bin.
+The compiled entry point is `dist/index.js` (also exposed as the
+`zcode-acp-server` bin). Configure your ACP client to launch it — see
+**Configure Zed** below or your editor's ACP docs.
 
 ## Configure Zed
 
@@ -64,22 +67,14 @@ Restart Zed and pick **ZCode** from the agent dropdown.
 ```bash
 pnpm install
 pnpm build       # tsc → dist/
+pnpm typecheck   # tsc --noEmit
+pnpm lint        # eslint (warnings advisory; errors fail CI)
 pnpm test        # vitest
 pnpm format      # prettier on src/
 ```
 
-## Quick Start
-
-```bash
-# Install dependencies and build
-pnpm install
-pnpm build
-
-# Start the server (manual testing)
-node dist/index.js
-```
-
-Configure your ACP client (e.g. Zed, JetBrains) to point to `dist/index.js` — see **Configure Zed** below.
+CI runs `typecheck`, `lint`, `build`, and `test` on every push and pull
+request — run them locally before pushing (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Architecture
 

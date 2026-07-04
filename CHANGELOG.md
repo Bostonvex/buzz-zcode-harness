@@ -7,29 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] - 2026-07-04
+
+Initial release: a standalone TypeScript ACP server bridging the headless
+ZCode app-server to ACP-compatible editors (Zed, JetBrains).
+
 ### Added
-- Elicitation form path: `AskUserQuestion` and `ExitPlanMode` now prefer
-  `elicitation/create` (form mode) when the client declares
+- ZCode subprocess client with reader-loop multiplexing and process-group
+  isolation.
+- Event-stream listener (`session/subscribe` + `session/event`).
+- Event translators + projection differ with dual-path deduplication.
+- Bash terminal protocol (2-notification split: `terminal_output` +
+  `terminal_exit`).
+- Interaction adapter: `requestPermission`, `ExitPlanMode`, `AskUserQuestion`
+  — preferring `elicitation/create` (form mode) when the client declares
   `clientCapabilities.elicitation.form`, falling back to per-question
   `session/request_permission`.
-- `sendAvailableCommandsDeferred`: slash commands are advertised 50ms after the
-  session response so the client state machine is ready.
-- `supportsElicitationForm()` capability detection.
-- Interaction requests (permission / elicitation) now carry a `toolCallId`
-  session-scope so the client can associate the form with its tool call.
-- Interaction request timeout (600s) and turn-cancel polling — a user pressing
-  stop during a popup no longer waits for the full client-response window.
-- Initial `usage_update` on `session/resume` (parity with the Python bridge).
+- Session lifecycle + extensions: `fork`, `rewind`, `rewindCascade`, `goal`,
+  `compact`, `steer`, `cancelBackgroundTask`, `setMode`, `setModel`,
+  `setThoughtLevel`, `updateRuntimeModelConfig`.
+- Slash command interception (`/compact`, `/goal`, `/fork`, `/rewind`,
+  `/steer`, `/model`, `/mode`, `/thought`).
+- `configOptions` + runtime model overlay (resumes use the active provider's
+  OAuth creds).
+- tasks-index sqlite sync (Node ≥ 22 `node:sqlite`, best-effort).
+- Slash commands advertised 50ms after the session response so the client
+  state machine is ready (`sendAvailableCommandsDeferred`).
+- Interaction request timeout (600s) with turn-cancel polling — a user
+  pressing stop during a popup no longer waits for the full client-response
+  window.
+- Initial `usage_update` on `session/resume` and `session/load`.
 - ESLint + `lint` script, `typecheck` script, GitHub Actions CI.
 - `CONTRIBUTING.md`, `CHANGELOG.md`, full `docs/` (Architecture, Protocol,
   Development, Troubleshooting).
 
 ### Fixed
-- `buildSnapshot` now flattens `todoGroups` as a **list** (it was read as a
-  single object); the plan list is no longer empty on `session/load` and
+- `buildSnapshot` flattens `todoGroups` as a **list** (it was read as a single
+  object); the plan list is no longer empty on `session/load` and
   `PlanUpdate` is correctly emitted at turn completion.
-- `session/resume` emits the initial `usage_update` so the context bar shows
-  immediately.
 - Cached reannounce replies use `sendReply` (`{id, result}`) instead of
   `notify` (`{method, params}`).
 - Shutdown triggers on stdin-close and backend-death (no orphan processes).
@@ -43,23 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stable plan signatures (sorted keys) prevent spurious `PlanUpdate`.
 
 ### Changed
-- `engines.node` corrected to `>=22.0.0` (the bridge requires `node:sqlite`).
-- `package.json` declares `files`, `repository`, `keywords`, `types`, etc.
+- `engines.node` is `>=22.0.0` (the bridge requires `node:sqlite`).
+- `package.json` declares `files`, `repository`, `keywords`, `types`,
+  `packageManager`.
 - Deferred command notifications and the cancel poll use `unref()` timers so
   they cannot keep the event loop alive.
-- Removed dead `PendingTurn.permResponses` field (the ACP SDK `cx.request`
-  supersedes it).
-
-## [0.1.0] - initial port
-
-Full port of the Python ACP bridge to a standalone TypeScript package:
-- ZCode subprocess client with reader-loop multiplexing
-- Event-stream listener (`session/subscribe`)
-- Event translators + projection differ (dual-path dedup)
-- Bash terminal protocol (2-notification split)
-- Interaction adapter (`requestPermission`, `ExitPlanMode`, `AskUserQuestion`)
-- Session lifecycle + extensions (`fork`, `rewind`, `goal`, `compact`, `steer`,
-  `setMode`, `setModel`, `setThoughtLevel`, ...)
-- Slash command interception
-- `configOptions` + runtime model overlay
-- tasks-index sqlite sync

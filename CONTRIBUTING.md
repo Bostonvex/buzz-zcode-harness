@@ -46,8 +46,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full development guide
 - **Linting**: ESLint with `@typescript-eslint`.
 - **Imports**: order `node:` builtins first, then third-party, then local
   (`./...`). Group with blank lines.
-- **Comments / docs / commit messages**: English only (see `AGENTS.md` if
-  present in the wider monorepo).
+- **Comments / docs / commit messages**: English only.
 - **Logging**: use the `log()` helper from `src/utils.ts` (writes to stderr —
    never pollute stdout, which carries the ACP protocol stream).
 
@@ -81,7 +80,7 @@ Examples:
 
 ## Reporting Bugs
 
-Open a [GitHub Issue](../../issues) with:
+Open a [GitHub Issue](https://github.com/zcode-org/zcode-acp-server/issues) with:
 - ZCode CLI version (`zcode --version`)
 - Editor + version (Zed, JetBrains, ...)
 - Node.js version (`node --version`)
