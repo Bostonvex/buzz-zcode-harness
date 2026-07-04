@@ -3,10 +3,8 @@
  *
  * These map ACP session methods to ZCode app-server calls. `session/prompt` runs
  * the event-driven turn loop (subscribe-before-send ordering, no-progress
- * timeout, stall reconciliation) — text/tool translation is wired in Commit 4
- * and the Bash terminal protocol in Commit 5; for now this loop forwards
- * streaming text and waits for turn completion so the path is end-to-end
- * usable.
+ * timeout, stall reconciliation). ZCode events are translated via
+ * EventTranslator and dispatched as ACP `session/update` notifications.
  */
 
 import process from "node:process";
@@ -21,8 +19,10 @@ import type {
   ZcodeMessage,
   ZcodeMessagesResult,
 } from "../backend/types.js";
+import { EventTranslator, formatTurnError } from "../translators/index.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
+import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk } from "./io.js";
 
 /** Workspace descriptor used in session create/resume calls. */
@@ -244,9 +244,8 @@ export async function prompt(
     const accepted = (sendResp.result ?? {}) as { accepted?: boolean };
     if (!accepted.accepted) throw new Error("zcode send not accepted");
 
-    // Minimal turn loop: forward streaming text, wait for turn completion.
-    // Full translation (tool_call, usage, plan, terminal) lands in Commit 4/5.
-    const result = await runEventTurnMinimal(
+    // Event-driven turn loop: translate events via EventTranslator + dispatch.
+    const result = await runEventTurn(
       server,
       listener,
       monitor,
@@ -313,13 +312,15 @@ async function fetchMessages(server: ZcodeAcpServer, zcodeSid: string): Promise<
 }
 
 /**
- * Minimal event-driven turn loop (replaced by the full translator in Commit 4).
+ * Event-driven turn loop: translate zcode events via EventTranslator and
+ * dispatch each internal event to the ACP client. No-progress timeout is 120s
+ * (refreshed by any event). Cancel is honoured on each iteration.
  *
- * Forwards `model.streaming` text deltas to the client and waits for
- * turn.completed/turn.failed. No-progress timeout is 120s (refreshed by any
- * event). Cancel is honoured on each iteration.
+ * Server→client requests (interaction/*) are drained each iteration; full
+ * handling (requestPermission / ExitPlanMode / AskUserQuestion) lands in
+ * Commit 6 — for now they're polled to keep the inbox clear.
  */
-async function runEventTurnMinimal(
+async function runEventTurn(
   server: ZcodeAcpServer,
   listener: EventStreamListener,
   monitor: TurnMonitor,
@@ -329,12 +330,15 @@ async function runEventTurnMinimal(
   turn: { zcodeSid: string; cancelled: boolean },
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
+  const translator = new EventTranslator();
   const NO_PROGRESS_MS = 120_000;
   let lastProgress = Date.now();
-  let turnStarted = false;
+  let lastStallCheck = Date.now();
+  let emittedText = false;
+  let emittedOutput = false;
 
   while (Date.now() - lastProgress < NO_PROGRESS_MS) {
-    // Drain server→client requests during the turn (full handling in Commit 6).
+    // Drain server→client requests (full handling in Commit 6).
     backend.pollServerRequests();
 
     if (turn.cancelled) {
@@ -344,10 +348,26 @@ async function runEventTurnMinimal(
 
     const ev = await listener.pollEvent(500);
     if (ev === null) {
-      // Stall reconciliation: probe authoritative status.
-      if (turnStarted && Date.now() - lastProgress > 15_000) {
+      // Stall reconciliation: probe authoritative status after 15s of silence.
+      if (
+        translator.turnStarted &&
+        Date.now() - lastProgress > 15_000 &&
+        Date.now() - lastStallCheck > 15_000
+      ) {
+        lastStallCheck = Date.now();
         const proj = await monitor.pollOnce();
         if (proj?.status === "idle") {
+          // Turn completed but the event was lost.
+          if (!emittedText) {
+            const reply = await fetchLastReply(server, turn.zcodeSid);
+            if (reply) {
+              await sendTextChunk(cx, acpSid, reply, chunkMsgId);
+            } else if (!emittedOutput) {
+              // No text and no output → suspected failure.
+              backend.notify("session/stop", { sessionId: turn.zcodeSid });
+              throw new RequestError(-32603, "turn produced no output");
+            }
+          }
           return { stopReason: "end_turn" };
         }
         if (proj?.status === "running") {
@@ -359,26 +379,25 @@ async function runEventTurnMinimal(
     }
 
     lastProgress = Date.now();
-    if (ev.type === "turn.started") {
-      turnStarted = true;
-      continue;
+    const internalEvents = translator.translate(ev);
+    for (const iev of internalEvents) {
+      if (iev.kind === "TextDelta") emittedText = true;
+      if (iev.kind === "ToolCallNew" || iev.kind === "ToolCallUpdate") emittedOutput = true;
+      await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
     }
-    if (ev.type === "turn.completed") {
-      const payload = ev.payload as { resultType?: string };
-      if (payload.resultType === "cancelled") return { stopReason: "cancelled" };
+
+    if (translator.turnDone) {
+      if (translator.turnFailed) {
+        backend.notify("session/stop", { sessionId: turn.zcodeSid });
+        throw new RequestError(-32603, formatTurnError(translator.turnError));
+      }
+      // Fallback: if no text streamed, surface the last assistant reply.
+      if (!emittedText) {
+        const reply = await fetchLastReply(server, turn.zcodeSid);
+        if (reply) await sendTextChunk(cx, acpSid, reply, chunkMsgId);
+      }
       return { stopReason: "end_turn" };
     }
-    if (ev.type === "turn.failed") {
-      const payload = ev.payload as { error?: { message?: string; code?: string } };
-      throw new RequestError(-32603, formatTurnError(payload.error));
-    }
-    if (ev.type === "model.streaming") {
-      const payload = ev.payload as { kind?: string; delta?: string };
-      if (payload.kind === "text_delta" && payload.delta) {
-        await sendTextChunk(cx, acpSid, payload.delta, chunkMsgId);
-      }
-    }
-    // tool.updated / session.updated handled in Commit 4.
   }
 
   // 120s no progress: abandon.
@@ -386,12 +405,22 @@ async function runEventTurnMinimal(
   return { stopReason: "max_turn_requests" };
 }
 
-/** Render a turn.failed error into a short message. */
-function formatTurnError(err: { message?: string; code?: string } | undefined): string {
-  if (!err) return "turn failed";
-  const code = err.code ?? "";
-  const msg = err.message ?? "";
-  return [code, msg].filter(Boolean).join(" ").trim() || "turn failed";
+/** Fetch the last assistant message text as a fallback for lost text events. */
+async function fetchLastReply(server: ZcodeAcpServer, zcodeSid: string): Promise<string | null> {
+  const messages = await fetchMessages(server, zcodeSid);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    if (m.info?.role !== "assistant") continue;
+    for (let j = (m.parts ?? []).length - 1; j >= 0; j--) {
+      const p = m.parts[j];
+      if (p && typeof p === "object" && (p as { type?: string }).type === "text") {
+        const text = (p as { text?: string }).text ?? "";
+        if (text.trim()) return text;
+      }
+    }
+  }
+  return null;
 }
 
 /** Send available commands after the response (Commit 8 fills slash handling). */
