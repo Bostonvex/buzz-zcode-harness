@@ -20,6 +20,9 @@ import type {
   ZcodeMessagesResult,
   ZcodeSnapshot,
 } from "../backend/types.js";
+import { buildModes, buildConfigOptions } from "../config/options.js";
+import { emitInitialUsage } from "../config/model-cache.js";
+import { buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
   buildDiffContent,
   EventTranslator,
@@ -72,9 +75,12 @@ export async function newSession(
   server.sessionMap.set(sid, sid);
   log(`session/new → ${sid}`);
 
-  // Commit 7 fills modes/configOptions; return minimal valid response for now.
   void sendAvailableCommandsDeferred(server, sid);
-  return { sessionId: sid };
+  return {
+    sessionId: sid,
+    modes: await buildModes(server, sid),
+    configOptions: await buildConfigOptions(server, sid),
+  };
 }
 
 /** `session/list` → zcode `session/list`. */
@@ -116,14 +122,21 @@ export async function resumeSession(
     sessionId: targetSid,
     workspace: workspaceFor(cwd),
   };
-  // runtimeModel overlay added in Commit 7.
+  // runtimeModel overlay: a resumed session may carry a stale provider id in
+  // its history → backend can't auth. Send the current enabled provider so the
+  // backend overlays it and uses its own OAuth creds.
+  const runtimeModel = buildResumeRuntimeModel();
+  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
 
   server.sessionMap.set(targetSid, targetSid);
   log(`session/resume → ${targetSid}`);
   void sendAvailableCommandsDeferred(server, targetSid);
-  return {};
+  return {
+    modes: await buildModes(server, targetSid),
+    configOptions: await buildConfigOptions(server, targetSid),
+  };
 }
 
 /**
@@ -144,6 +157,8 @@ export async function loadSession(
     sessionId: targetSid,
     workspace: workspaceFor(cwd),
   };
+  const runtimeModel = buildResumeRuntimeModel();
+  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
   server.sessionMap.set(targetSid, targetSid);
@@ -202,9 +217,30 @@ export async function loadSession(
   }
   log(`session/load: replayed ${replayed} messages`);
 
-  // Initial plan replay + emit_initial_usage arrive in Commits 4/7.
+  // Replay the existing todo list as an initial plan so a loaded session shows
+  // its todos immediately (filter to PlanUpdate only — text/tools were already
+  // replayed above and the differ hasn't mark_seen'd this history).
+  try {
+    const snapshot = await buildSnapshot(server, targetSid);
+    const loadDiffer = getOrCreateDiffer(server, targetSid);
+    const planEvents = loadDiffer.diff(snapshot).filter((e) => e.kind === "PlanUpdate");
+    for (const iev of planEvents) {
+      await dispatchEvent(server, cx, targetSid, iev, `load_${randomUUID().slice(0, 8)}`);
+    }
+  } catch (e) {
+    log(
+      `session/load: initial plan read failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  // Initial usage_update so the editor shows the context bar immediately.
+  await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
+
   void sendAvailableCommandsDeferred(server, targetSid);
-  return {};
+  return {
+    modes: await buildModes(server, targetSid),
+    configOptions: await buildConfigOptions(server, targetSid),
+  };
 }
 
 /** `session/prompt` → subscribe-before-send, run the event-driven turn loop. */
@@ -276,6 +312,29 @@ export async function prompt(
     backend.unregisterEventListener(zcodeSid);
     server.pendingTurns.delete(requestId);
   }
+}
+
+/**
+ * `session/set_config_option` → dispatch model/mode/thought and emit the
+ * resulting config_option_update (+ current_mode_update for mode).
+ */
+export async function setConfigOptionHandler(
+  server: ZcodeAcpServer,
+  params: acp.SetSessionConfigOptionRequest,
+  cx: acp.AgentContext,
+): Promise<acp.SetSessionConfigOptionResponse> {
+  const zcodeSid = server.resolveSid(params.sessionId);
+  if (!zcodeSid) throw new Error(`session ${params.sessionId} not found`);
+  if (typeof params.value !== "string") {
+    throw new Error(`unsupported config value type: ${String(params.value)}`);
+  }
+  const { setConfigOption, emitConfigOptionUpdate } = await import("../config/options.js");
+  const result = await setConfigOption(server, zcodeSid, params.configId, params.value);
+  if (!result) {
+    throw new Error(`unsupported config option or switch failed: ${params.configId}`);
+  }
+  await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, result.kind);
+  return { configOptions: [] };
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   newSession,
   prompt,
   resumeSession,
+  setConfigOptionHandler,
 } from "./handlers/session.js";
 import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, log } from "./utils.js";
@@ -42,6 +43,9 @@ async function main(): Promise<void> {
     .onRequest("session/load", (ctx) => loadSession(server, ctx.params, ctx.client))
     .onRequest("session/prompt", (ctx) =>
       prompt(server, ctx.params, ctx.client, ctx.requestId as number),
+    )
+    .onRequest("session/set_config_option", (ctx) =>
+      setConfigOptionHandler(server, ctx.params, ctx.client),
     )
     .onNotification("session/cancel", (ctx) => cancel(server, ctx.params))
     .connect(stream);

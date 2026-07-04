@@ -81,6 +81,11 @@ export class ProjectionDiffer {
     this.emittedTextThisTurn = false;
   }
 
+  /** Set the usage baseline so the next diff won't re-emit the same value. */
+  setLastUsage(used: number): void {
+    this.lastUsage = used;
+  }
+
   /** Diff two snapshots. Returns 0..n events. */
   diff(curSnapshot: ZcodeSnapshot | null): InternalEvent[] {
     const events: InternalEvent[] = [];

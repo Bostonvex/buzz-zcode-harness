@@ -40,6 +40,40 @@ export const SLASH_COMMANDS = [
   { name: "/thought", description: "Set the thought level (max/high/nothink)" },
 ] as const;
 
+/** Static metadata for the configOptions selects (model/mode/thought). */
+export const CONFIG_META = {
+  model: {
+    name: "Model",
+    category: "model",
+    options: [] as Array<{ value: string; name: string }>,
+  },
+  mode: {
+    name: "Mode",
+    category: "mode",
+    options: [
+      { value: "plan", name: "Plan" },
+      { value: "build", name: "Build" },
+      { value: "edit", name: "Edit" },
+      { value: "yolo", name: "Yolo" },
+    ],
+  },
+  thought: {
+    name: "Thought",
+    category: "thought",
+    options: [
+      { value: "max", name: "Max" },
+      { value: "high", name: "High" },
+      { value: "nothink", name: "Nothink" },
+    ],
+  },
+} as const;
+
+/** configId → zcode method + param key (model deliberately absent — switch via runtimeModel). */
+export const CONFIG_DISPATCH: Record<string, { method: string; paramKey: string }> = {
+  mode: { method: "session/setMode", paramKey: "mode" },
+  thought: { method: "session/setThoughtLevel", paramKey: "thoughtLevel" },
+};
+
 /**
  * Log a message to stderr with a stable prefix. Never use console.log —
  * stdout is reserved for the ACP JSON-RPC stream.

@@ -12,6 +12,8 @@
 import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
+import { currentModelCached } from "../config/model-cache.js";
+import { modelContextWindow } from "../config/options.js";
 import { extractExitCode, TOOL_KIND_MAP } from "../translators/tool-helpers.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -184,22 +186,18 @@ async function dispatchUsageDelta(
   acpSid: string,
   ev: Extract<InternalEvent, { kind: "UsageDelta" }>,
 ): Promise<void> {
-  // The backend often returns contextWindow=0; fill from the model's config
-  // limit.context (Commit 7 wires _modelContextWindow). For now pass through.
+  // The backend often returns contextWindow=0; fill from the model's
+  // config.json limit.context so the editor can render the context bar.
   let size = ev.size;
   if (!size) {
-    size = await modelContextWindowStub(server, acpSid);
+    const modelId = await currentModelCached(server, acpSid);
+    size = modelContextWindow(modelId);
   }
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "usage_update",
     used: ev.used,
     size,
   });
-}
-
-/** Placeholder for the config-backed context window (filled in Commit 7). */
-async function modelContextWindowStub(_server: ZcodeAcpServer, _acpSid: string): Promise<number> {
-  return 0;
 }
 
 function dispatchFilesChanged(
