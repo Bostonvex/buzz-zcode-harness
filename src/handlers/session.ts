@@ -32,6 +32,7 @@ import { log } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk } from "./io.js";
+import { handleServerRequests } from "./server-requests.js";
 
 /** Workspace descriptor used in session create/resume calls. */
 function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: string } {
@@ -375,8 +376,11 @@ async function runEventTurn(
   let emittedOutput = false;
 
   while (Date.now() - lastProgress < NO_PROGRESS_MS) {
-    // Drain server→client requests (full handling in Commit 6).
-    backend.pollServerRequests();
+    // Drain + handle server→client requests (interaction/*). Refreshes the
+    // no-progress timer when any are handled.
+    if (await handleServerRequests(server, backend, cx, acpSid)) {
+      lastProgress = Date.now();
+    }
 
     if (turn.cancelled) {
       backend.notify("session/stop", { sessionId: turn.zcodeSid });

@@ -158,6 +158,26 @@ export class ZcodeBackend {
     return this.serverRequests.splice(0, this.serverRequests.length);
   }
 
+  /** Reply to a zcode server→client request with a result (id + result). */
+  sendReply(id: number, result: unknown): void {
+    const stdin = this.proc.stdin;
+    if (!stdin || stdin.destroyed) {
+      log("backend: sendReply dropped (stdin closed)");
+      return;
+    }
+    stdin.write(JSON.stringify({ id, result }) + "\n");
+  }
+
+  /** Reply to a zcode server→client request with an error. */
+  sendError(id: number, code: number, message: string): void {
+    const stdin = this.proc.stdin;
+    if (!stdin || stdin.destroyed) {
+      log("backend: sendError dropped (stdin closed)");
+      return;
+    }
+    stdin.write(JSON.stringify({ id, error: { code, message } }) + "\n");
+  }
+
   // ---------- send / request ----------
 
   /** Fire-and-forget notification to ZCode (no id, no response). */
