@@ -10,12 +10,16 @@ import {
   acpPermissionResponseToExitPlanMode,
   acpPermissionResponseToZcode,
   buildAskUserAcpParams,
+  buildAskUserElicitationForm,
+  buildExitPlanModeElicitationForm,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
   isUserInputRequest,
+  parseAskUserElicitationResponse,
   parseAskUserResponse,
+  parseExitPlanModeElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../src/interaction/adapter.js";
@@ -202,5 +206,153 @@ describe("parseAskUserResponse", () => {
   });
   it("cancelled → null", () => {
     expect(parseAskUserResponse({ outcome: { outcome: "cancelled" } })).toBeNull();
+  });
+});
+
+describe("elicitation form: AskUserQuestion", () => {
+  const baseParams = {
+    requestId: "req_1",
+    sessionId: "sess_1",
+    toolCallId: "tc_1",
+    questions: [
+      {
+        question: "Pick a color",
+        multiSelect: false,
+        options: [
+          { label: "Red", value: "red" },
+          { label: "Blue", value: "blue" },
+        ],
+      },
+    ],
+  };
+
+  it("single-select enum includes a trailing Skip option", () => {
+    const form = buildAskUserElicitationForm(baseParams, "acp_1");
+    const prop = form.requestedSchema.properties.q_0 as { enum: string[] };
+    expect(prop.enum).toEqual(["Red", "Blue", "__skip__"]);
+    expect(form.requestedSchema.required).toEqual(["q_0"]);
+  });
+
+  it("multi-select fields are arrays and not required", () => {
+    const params = {
+      ...baseParams,
+      questions: [
+        {
+          question: "Pick files",
+          multiSelect: true,
+          options: [
+            { label: "a.ts", value: "a" },
+            { label: "b.ts", value: "b" },
+          ],
+        },
+      ],
+    };
+    const form = buildAskUserElicitationForm(params, "acp_1");
+    const prop = form.requestedSchema.properties.q_0 as {
+      type: string;
+      items: { type: string; enum: string[] };
+    };
+    expect(prop.type).toBe("array");
+    expect(prop.items.type).toBe("string");
+    expect(prop.items.enum).toEqual(["a.ts", "b.ts"]);
+    expect(form.requestedSchema.required).not.toContain("q_0");
+  });
+
+  it("attaches toolCallId scope when provided", () => {
+    const form = buildAskUserElicitationForm(baseParams, "acp_1", "tc_1");
+    expect(form.toolCallId).toBe("tc_1");
+    expect(form.sessionId).toBe("acp_1");
+  });
+
+  it("omits toolCallId when not provided", () => {
+    const form = buildAskUserElicitationForm(baseParams, "acp_1");
+    expect(form.toolCallId).toBeUndefined();
+  });
+
+  it("parse maps answers back by question text", () => {
+    const form = buildAskUserElicitationForm(baseParams, "acp_1");
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: "Red" } },
+      baseParams,
+    );
+    expect(answers).toEqual({ "Pick a color": "Red" });
+  });
+
+  it("parse multi-select joins with ', '", () => {
+    const params = {
+      ...baseParams,
+      questions: [
+        {
+          question: "Pick files",
+          multiSelect: true,
+          options: [
+            { label: "a.ts", value: "a" },
+            { label: "b.ts", value: "b" },
+          ],
+        },
+      ],
+    };
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: ["a.ts", "b.ts"] } },
+      params,
+    );
+    expect(answers).toEqual({ "Pick files": "a.ts, b.ts" });
+  });
+
+  it("parse skips the __skip__ sentinel (single-select)", () => {
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: "__skip__" } },
+      baseParams,
+    );
+    // Skipped question is omitted from the answers map (parity with
+    // request_permission path leaving it unanswered on Skip).
+    expect(answers).toEqual({});
+  });
+
+  it("parse returns null on decline/cancel", () => {
+    expect(parseAskUserElicitationResponse({ action: "decline" }, baseParams)).toBeNull();
+    expect(parseAskUserElicitationResponse({ action: "cancel" }, baseParams)).toBeNull();
+  });
+});
+
+describe("elicitation form: ExitPlanMode", () => {
+  const epmParams = {
+    requestId: "req_2",
+    sessionId: "sess_1",
+    toolCallId: "tc_2",
+    schema: { interaction: "plan_approval" },
+    input: { plan: "Step 1\nStep 2" },
+  };
+
+  it("embeds the plan text in the message", () => {
+    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
+    expect(form.message).toContain("Step 1");
+    expect(form.message).toContain("Ready to code?");
+  });
+
+  it("attaches toolCallId scope when provided", () => {
+    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1", "tc_2");
+    expect(form.toolCallId).toBe("tc_2");
+  });
+
+  it("approve → accept with answer_0", () => {
+    const resp = parseExitPlanModeElicitationResponse({
+      action: "accept",
+      content: { decision: "approve" },
+    });
+    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
+  });
+
+  it("reject → decline", () => {
+    const resp = parseExitPlanModeElicitationResponse({
+      action: "accept",
+      content: { decision: "reject" },
+    });
+    expect(resp.action).toBe("decline");
+  });
+
+  it("cancel → decline", () => {
+    const resp = parseExitPlanModeElicitationResponse({ action: "cancel" });
+    expect(resp.action).toBe("decline");
   });
 });

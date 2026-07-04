@@ -15,7 +15,6 @@
  * their zcode id for a later unified reply.
  */
 
-import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ServerRequest, ZcodeBackend } from "../backend/client.js";
@@ -186,14 +185,15 @@ async function handleSinglePermission(
     const formParams = buildExitPlanModeElicitationForm(
       p as ZcodeInteractionUserInputParams,
       acpSid,
+      toolCallId || undefined,
     );
     log(`  ⟳ ExitPlanMode forwarding elicitation/create (form)`);
-    const elicResp = await cx
-      .request("elicitation/create", formParams as never)
-      .catch((e: unknown) => {
-        log(`  ⚠ elicitation/create failed: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
-      });
+    const elicResp = await requestWithTimeout(
+      cx,
+      "elicitation/create",
+      formParams,
+      "elicitation/create",
+    );
     if (elicResp === null) {
       return { action: "decline", reason: "elicitation failed" };
     }
@@ -209,12 +209,12 @@ async function handleSinglePermission(
   log(
     `  ⟳ ${toolName || "permission"}, forwarding session/request_permission (acp_id=${acpReqId})`,
   );
-  const acpResp = await cx
-    .request("session/request_permission", acpParams, { cancellationSignal: undefined as never })
-    .catch((e: unknown) => {
-      log(`  ⚠ request_permission failed: ${e instanceof Error ? e.message : String(e)}`);
-      return null;
-    });
+  const acpResp = await requestWithTimeout(
+    cx,
+    "session/request_permission",
+    acpParams,
+    "request_permission",
+  );
   if (acpResp === null) {
     return { action: "decline", reason: "timeout or cancelled" };
   }
@@ -323,14 +323,14 @@ async function handleAskUserViaElicitation(
     rawInput,
     _meta: { claudeCode: { toolName } },
   });
-  const formParams = buildAskUserElicitationForm(params, acpSid);
+  const formParams = buildAskUserElicitationForm(params, acpSid, toolCallId || undefined);
   log(`  ⟳ AskUserQuestion forwarding elicitation/create (form, ${Object.keys(formParams.requestedSchema.properties).length} fields)`);
-  const acpResp = await cx
-    .request("elicitation/create", formParams as never)
-    .catch((e: unknown) => {
-      log(`  ⚠ elicitation/create failed: ${e instanceof Error ? e.message : String(e)}`);
-      return null;
-    });
+  const acpResp = await requestWithTimeout(
+    cx,
+    "elicitation/create",
+    formParams,
+    "elicitation/create",
+  );
   if (acpResp === null) {
     return { action: "decline", reason: "elicitation failed" };
   }
@@ -379,14 +379,59 @@ async function askOnce(
 ): Promise<unknown> {
   const acpReqId = _server.nextId();
   log(`  ⟳ AskUserQuestion forwarding session/request_permission (acp_id=${acpReqId})`);
-  return cx
-    .request("session/request_permission", acpParams as never, {
-      cancellationSignal: undefined as never,
-    })
-    .catch((e: unknown) => {
-      log(`  ⚠ request_permission failed: ${e instanceof Error ? e.message : String(e)}`);
-      return null;
-    });
+  return requestWithTimeout(
+    cx,
+    "session/request_permission",
+    acpParams,
+    "request_permission",
+  );
+}
+
+// ---------- request helpers ----------
+
+/**
+ * Interaction request timeout. Python's `_await_client_response` uses 600s and
+ * this matches it — long enough for slow models, retries, and user deliberation
+ * (well past the turn loop's 120s no-progress guard), while still bounding a
+ * dead client so it cannot pin a turn forever (the turn loop's
+ * `await handleServerRequests` would otherwise block indefinitely and the 120s
+ * no-progress timer could never re-check).
+ */
+const INTERACTION_TIMEOUT_MS = 600_000;
+
+/**
+ * Send a client-side request with a timeout. Resolves to the client response,
+ * or `null` on timeout/error (callers treat null as decline). The underlying
+ * `cx.request` promise stays pending after a timeout (the SDK has no abort),
+ * but we no longer await it; it settles naturally when the client eventually
+ * responds or the connection closes.
+ */
+async function requestWithTimeout(
+  cx: acp.AgentContext,
+  method: string,
+  params: unknown,
+  label: string,
+  timeoutMs = INTERACTION_TIMEOUT_MS,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      log(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
+      resolve(null);
+    }, timeoutMs);
+  });
+  try {
+    const resp = await Promise.race([
+      cx.request(method, params as never).catch((e: unknown) => {
+        log(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }),
+      timeout,
+    ]);
+    return resp;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------- reply helpers ----------
@@ -437,6 +482,3 @@ function sendZcodeError(backend: ZcodeBackend, zcodeId: number, message: string)
 function isUserInputRequestUnchecked(method: string): boolean {
   return method === "interaction/requestUserInput";
 }
-
-// Unused export guard to keep randomUUID import if not otherwise referenced.
-void randomUUID;

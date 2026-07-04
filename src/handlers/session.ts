@@ -121,6 +121,7 @@ export async function listSessions(
 export async function resumeSession(
   server: ZcodeAcpServer,
   params: acp.ResumeSessionRequest,
+  cx: acp.AgentContext,
 ): Promise<acp.ResumeSessionResponse> {
   const backend = server.ensureBackend();
   const targetSid = params.sessionId;
@@ -141,6 +142,9 @@ export async function resumeSession(
 
   server.sessionMap.set(targetSid, targetSid);
   log(`session/resume -> ${targetSid}`);
+  // Initial usage_update so the editor shows the context bar immediately for a
+  // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
+  await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
   return {
     modes: await buildModes(server, targetSid),
     configOptions: await buildConfigOptions(server, targetSid),

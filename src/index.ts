@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     })
     .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
     .onRequest("session/resume", async (ctx) => {
-      const result = await resumeSession(server, ctx.params);
+      const result = await resumeSession(server, ctx.params, ctx.client);
       sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, SLASH_COMMANDS);
       return result;
     })

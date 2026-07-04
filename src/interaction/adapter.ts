@@ -222,18 +222,23 @@ export function parseAskUserResponse(acpResp: unknown): string | null {
  * Build an elicitation form schema for an AskUserQuestion request.
  *
  * Each question becomes one property in the form:
- *   - Single-select → string enum of labels
+ *   - Single-select → string enum of labels + a trailing "Skip" option
  *   - Multi-select  → string array enum of labels
  *
  * When the client supports form-based elicitation, this lets the user answer
- * all questions in one form rather than one popup per question.
+ * all questions in one form rather than one popup per question. Single-select
+ * fields include a "Skip" option so the user can opt out of a question without
+ * cancelling the whole form (mirrors the request_permission fallback, which
+ * appends a Skip option per question).
  */
 export function buildAskUserElicitationForm(
   params: ZcodeInteractionUserInputParams,
   acpSid: string,
+  toolCallId?: string,
 ): {
   mode: "form";
   sessionId: string;
+  toolCallId?: string;
   message: string;
   requestedSchema: {
     type: "object";
@@ -260,9 +265,11 @@ export function buildAskUserElicitationForm(
         description: q.question,
       };
     } else {
+      // Append a Skip option so the user can opt out of this question without
+      // cancelling the whole form (parity with the request_permission path).
       properties[key] = {
         type: "string",
-        enum: labels,
+        enum: [...labels, ELICIT_SKIP],
         title: q.question,
         description: q.question,
       };
@@ -273,13 +280,28 @@ export function buildAskUserElicitationForm(
     questions.length === 1
       ? (questions[0]?.question ?? "Please answer the question.")
       : `Please answer ${questions.length} questions.`;
-  return {
+  const form: {
+    mode: "form";
+    sessionId: string;
+    toolCallId?: string;
+    message: string;
+    requestedSchema: {
+      type: "object";
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+  } = {
     mode: "form",
     sessionId: acpSid,
     message,
     requestedSchema: { type: "object", properties, required },
   };
+  if (toolCallId) form.toolCallId = toolCallId;
+  return form;
 }
+
+/** Sentinel enum value marking a single-select question as skipped in the form. */
+const ELICIT_SKIP = "__skip__";
 
 /**
  * Parse an elicitation form response into the zcode answers map.
@@ -305,7 +327,10 @@ export function parseAskUserElicitationResponse(
     if (val == null) continue;
     if (Array.isArray(val)) {
       answers[q.question] = val.filter((v) => typeof v === "string").join(", ");
-    } else if (typeof val === "string") {
+    } else if (typeof val === "string" && val !== ELICIT_SKIP) {
+      // Skip the sentinel "__skip__" so a skipped single-select question is
+      // simply omitted from the answers map (parity with the request_permission
+      // path, which leaves the question unanswered on Skip).
       answers[q.question] = val;
     }
   }
@@ -321,9 +346,11 @@ export function parseAskUserElicitationResponse(
 export function buildExitPlanModeElicitationForm(
   params: ZcodeInteractionUserInputParams,
   acpSid: string,
+  toolCallId?: string,
 ): {
   mode: "form";
   sessionId: string;
+  toolCallId?: string;
   message: string;
   requestedSchema: {
     type: "object";
@@ -338,7 +365,17 @@ export function buildExitPlanModeElicitationForm(
   const message = planText
     ? `Ready to code?\n\n${planText}`
     : "Ready to code?";
-  return {
+  const form: {
+    mode: "form";
+    sessionId: string;
+    toolCallId?: string;
+    message: string;
+    requestedSchema: {
+      type: "object";
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+  } = {
     mode: "form",
     sessionId: acpSid,
     message,
@@ -355,6 +392,8 @@ export function buildExitPlanModeElicitationForm(
       required: ["decision"],
     },
   };
+  if (toolCallId) form.toolCallId = toolCallId;
+  return form;
 }
 
 /** Parse an ExitPlanMode elicitation response → zcode accept/decline. */
