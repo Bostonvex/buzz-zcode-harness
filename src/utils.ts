@@ -51,19 +51,19 @@ export const CONFIG_META = {
     name: "Mode",
     category: "mode",
     options: [
-      { value: "plan", name: "Plan" },
-      { value: "build", name: "Build" },
-      { value: "edit", name: "Edit" },
-      { value: "yolo", name: "Yolo" },
+      { value: "plan", name: "plan" },
+      { value: "build", name: "build" },
+      { value: "edit", name: "edit" },
+      { value: "yolo", name: "yolo" },
     ],
   },
   thought: {
-    name: "Thought",
-    category: "thought",
+    name: "Thought Level",
+    category: "thought_level",
     options: [
-      { value: "max", name: "Max" },
-      { value: "high", name: "High" },
-      { value: "nothink", name: "Nothink" },
+      { value: "max", name: "max" },
+      { value: "high", name: "high" },
+      { value: "nothink", name: "nothink" },
     ],
   },
 } as const;

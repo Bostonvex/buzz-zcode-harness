@@ -170,14 +170,15 @@ export async function setConfigOption(
   return { kind: configId as "mode" | "thought", currentValue: value };
 }
 
-/** Emit a config_option_update (+ current_mode_update for mode) after a change. */
+/** Emit a config_option_update (+ current_mode_update for mode) after a change.
+ *  Returns the rebuilt options so the caller can include them in the response. */
 export async function emitConfigOptionUpdate(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   zcodeSid: string,
   kind: "model" | "mode" | "thought",
-): Promise<void> {
+): Promise<acp.SessionConfigOption[]> {
   const options = await buildConfigOptions(server, zcodeSid);
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "config_option_update",
@@ -190,6 +191,7 @@ export async function emitConfigOptionUpdate(
       currentModeId: modes.currentModeId,
     });
   }
+  return options;
 }
 
 // ---------- helpers ----------

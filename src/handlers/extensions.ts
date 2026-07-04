@@ -16,6 +16,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { emitInitialUsage } from "../config/model-cache.js";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
+import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -136,8 +137,14 @@ export async function compact(
   log(`session/compact → ok (${released ? "lock released" : "⚠ lock wait timeout"})`);
   if (released) {
     // Refresh usage so the UI reflects the reduced contextUsed post-compact.
-    const differEntry = server.differs.get(zcodeSid);
-    await emitInitialUsage(server, cx, acpSid, zcodeSid, differEntry as never);
+    // Ensure a differ exists (compact may be the first action on a fresh session)
+    // and sync its usage baseline so the next turn won't re-emit the same value.
+    let differ = server.differs.get(zcodeSid);
+    if (!differ) {
+      differ = new ProjectionDiffer();
+      server.differs.set(zcodeSid, differ);
+    }
+    await emitInitialUsage(server, cx, acpSid, zcodeSid, differ);
   }
   return (resp.result ?? {}) as Result;
 }

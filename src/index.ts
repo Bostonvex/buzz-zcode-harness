@@ -51,20 +51,28 @@ async function main(): Promise<void> {
 
   log(`starting ${AGENT_INFO.name} ${AGENT_INFO.version}, ACP protocol v${acp.PROTOCOL_VERSION}`);
 
-  // Graceful shutdown: ensure the zcode subprocess group is reaped on signal
-  // or stdin close (so no orphans survive). Zed force-kills the bridge on
-  // reconnect; without this the SIGTERM handler wouldn't run close().
+  // Graceful shutdown: ensure the zcode subprocess group is reaped on signal,
+  // stdin close (Zed disconnect), or backend death (so no orphans survive).
+  // Zed force-kills the bridge on reconnect; without this the SIGTERM handler
+  // wouldn't run close() and the detached zcode process group would persist.
   let shuttingDown = false;
-  const shutdown = async (sig: string) => {
+  const shutdown = async (reason: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    log(`received ${sig}, shutting down`);
+    log(`shutting down (${reason})`);
     if (server.backend) await server.backend.close();
     process.exit(0);
   };
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
     process.on(sig, () => void shutdown(sig));
   }
+  // Zed disconnects by closing the bridge's stdin.
+  process.stdin.on("close", () => void shutdown("stdin closed"));
+  // Backend reader died (zcode subprocess exited) — bridge is useless without it.
+  const backendDeathInterval = setInterval(() => {
+    if (server.backend?.isDead) void shutdown("backend dead");
+  }, 2000);
+  backendDeathInterval.unref();
 
   acp
     .agent({ name: AGENT_INFO.name })

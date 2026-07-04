@@ -55,7 +55,9 @@ export async function emitInitialUsage(
       totalTokenCount?: number;
       contextWindow?: number;
     };
-    const used = proj.contextUsed ?? proj.totalTokenCount ?? 0;
+    // `||` (not `??`): an explicit contextUsed=0 is falsy and should fall back
+    // to totalTokenCount, matching Python's `proj.get("contextUsed",0) or ...`.
+    const used = proj.contextUsed || proj.totalTokenCount || 0;
     if (!used) return; // resume before any turn: skip to avoid showing 0.
     let size = proj.contextWindow ?? 0;
     if (!size) size = modelContextWindow(await currentModelCached(server, zcodeSid));

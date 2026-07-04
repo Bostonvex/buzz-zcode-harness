@@ -92,8 +92,9 @@ export class ProjectionDiffer {
     const curProj = (curSnapshot?.projection ?? {}) as ZcodeProjection;
     const curMsgs = curSnapshot?.messages ?? [];
 
-    // 1. usage_update: prefer contextUsed (current occupancy) over totalTokenCount (cumulative).
-    const used = curProj.contextUsed ?? curProj.totalTokenCount ?? 0;
+    // 1. usage_update: prefer contextUsed (current occupancy) over totalTokenCount
+    //    (cumulative). `||` so an explicit contextUsed=0 falls back to totalTokenCount.
+    const used = curProj.contextUsed || curProj.totalTokenCount || 0;
     const size = curProj.contextWindow ?? 0;
     if (this.lastUsage === null || used !== this.lastUsage) {
       if (size > 0) events.push({ kind: "UsageDelta", used, size });

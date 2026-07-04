@@ -365,8 +365,8 @@ export async function setConfigOptionHandler(
   if (!result) {
     throw new Error(`unsupported config option or switch failed: ${params.configId}`);
   }
-  await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, result.kind);
-  return { configOptions: [] };
+  const options = await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, result.kind);
+  return { configOptions: options };
 }
 
 /**

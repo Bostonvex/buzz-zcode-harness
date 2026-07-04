@@ -46,7 +46,10 @@ export class ZcodeAcpServer {
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
   /** Per-session ProjectionDiffers (persists across turns). */
-  readonly differs = new Map<string, unknown>();
+  readonly differs = new Map<
+    string,
+    import("./translators/projection-differ.js").ProjectionDiffer
+  >();
   /** Per-session model cache (Commit 7). */
   readonly modelCache = new Map<string, string>();
   /** Monotonic id counter; base 10_000_000 to avoid collisions with zcode-originated ids. */

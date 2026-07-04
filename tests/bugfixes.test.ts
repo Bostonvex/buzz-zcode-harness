@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
+import { CONFIG_META } from "../src/utils.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
 
 /** Build a listener over a fake backend (no subprocess; we drive handleEvent). */
@@ -73,5 +74,34 @@ describe("Bug I: stableStringify / plan signature stability", () => {
     expect(hasPlan).toBe(true); // first diff emits (baseline)
     expect(secondHasPlan).toBe(false); // key-order difference must NOT re-emit
     void events;
+  });
+});
+
+describe("Bug 3: thought configOption metadata matches Python", () => {
+  it("uses thought_level category, Thought Level name, lowercase option names", () => {
+    expect(CONFIG_META.thought.category).toBe("thought_level");
+    expect(CONFIG_META.thought.name).toBe("Thought Level");
+    const names = CONFIG_META.thought.options.map((o) => o.name);
+    expect(names).toEqual(["max", "high", "nothink"]);
+  });
+
+  it("uses lowercase mode option names", () => {
+    const names = CONFIG_META.mode.options.map((o) => o.name);
+    expect(names).toEqual(["plan", "build", "edit", "yolo"]);
+  });
+});
+
+describe("Bug 5: usage fallback treats contextUsed=0 as falsy", () => {
+  it("ProjectionDiffer falls back to totalTokenCount when contextUsed is 0", () => {
+    const d = new ProjectionDiffer();
+    const events = d.diff({
+      projection: { contextUsed: 0, totalTokenCount: 5000, contextWindow: 200000 },
+      messages: [],
+      todos: [],
+    });
+    const usage = events.find((e) => e.kind === "UsageDelta") as
+      { kind: "UsageDelta"; used: number; size: number } | undefined;
+    expect(usage).toBeDefined();
+    expect(usage?.used).toBe(5000); // contextUsed=0 falls back to totalTokenCount
   });
 });

@@ -109,7 +109,10 @@ async function handleOne(
   if (dedupKey && pending.has(dedupKey)) {
     const entry = pending.get(dedupKey)!;
     if (entry.result !== undefined) {
-      backend.notify("__interaction_reply__", { id: zcodeReqId, result: entry.result });
+      // Result already cached (client responded earlier): reply directly with
+      // {id, result} so zcode resolves the reannounced request. Must NOT use
+      // notify() (that writes {method, params}, not a valid response).
+      backend.sendReply(zcodeReqId, entry.result);
       log(`  ⟳ reannounce, returning cached result (zcode_id=${zcodeReqId})`);
     } else {
       entry.zcodeIds.push(zcodeReqId);
