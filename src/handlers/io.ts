@@ -1,0 +1,58 @@
+/**
+ * ACP client I/O helpers — thin wrappers over the AgentContext (cx) that the
+ * ACP SDK passes to each handler.
+ *
+ * The SDK exposes `cx.notify(method, params)` and `cx.request(method, params)`;
+ * these helpers name the common notifications/requests we send and centralise
+ * the JSON shape so handlers stay readable.
+ */
+
+import type * as acp from "@agentclientprotocol/sdk";
+import { RequestError } from "@agentclientprotocol/sdk";
+
+import type { ZcodeAcpServer } from "../server.js";
+
+/** Send a `session/update` notification to the client. */
+export function sendSessionUpdate(
+  cx: acp.AgentContext,
+  sessionId: string,
+  update: acp.SessionUpdate,
+): Promise<void> {
+  return cx.notify("session/update", { sessionId, update });
+}
+
+/** Send an `agent_message_chunk` text notification. */
+export function sendTextChunk(
+  cx: acp.AgentContext,
+  sessionId: string,
+  text: string,
+  messageId: string,
+): Promise<void> {
+  return sendSessionUpdate(cx, sessionId, {
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text },
+    messageId,
+  });
+}
+
+/** Send an `available_commands_update` notification listing our slash commands. */
+export function sendAvailableCommands(
+  cx: acp.AgentContext,
+  sessionId: string,
+  commands: ReadonlyArray<{ name: string; description: string }>,
+): Promise<void> {
+  return sendSessionUpdate(cx, sessionId, {
+    sessionUpdate: "available_commands_update",
+    availableCommands: commands.map((c) => ({ name: c.name, description: c.description })),
+  });
+}
+
+/** Throw a JSON-RPC error from a handler (the SDK converts it to an error response). */
+export function throwError(code: number, message: string): never {
+  throw new RequestError(code, message);
+}
+
+/** Server instance attached to the running agent (set by index.ts on connect). */
+export interface ServerHolder {
+  server: ZcodeAcpServer;
+}

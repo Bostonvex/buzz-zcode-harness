@@ -12,6 +12,14 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
 
+import {
+  cancel,
+  listSessions,
+  loadSession,
+  newSession,
+  prompt,
+  resumeSession,
+} from "./handlers/session.js";
 import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, log } from "./utils.js";
 
@@ -28,6 +36,14 @@ async function main(): Promise<void> {
   acp
     .agent({ name: AGENT_INFO.name })
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
+    .onRequest("session/new", (ctx) => newSession(server, ctx.params))
+    .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
+    .onRequest("session/resume", (ctx) => resumeSession(server, ctx.params))
+    .onRequest("session/load", (ctx) => loadSession(server, ctx.params, ctx.client))
+    .onRequest("session/prompt", (ctx) =>
+      prompt(server, ctx.params, ctx.client, ctx.requestId as number),
+    )
+    .onNotification("session/cancel", (ctx) => cancel(server, ctx.params))
     .connect(stream);
 }
 
