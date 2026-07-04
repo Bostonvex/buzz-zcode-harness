@@ -11,14 +11,14 @@ import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { execSync, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 import { log } from "../utils.js";
 
 /** `which bin` — resolve a binary on PATH without external deps. */
 function whichSync(bin: string): string | null {
   try {
-    const out = execSync(`which ${bin}`, {
+    const out = execFileSync("which", [bin], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -95,7 +95,11 @@ export function resolveZcodeCommand(): string[] {
     if (nodeSupportsSqlite(nodeBin)) {
       let ver = "?";
       try {
-        ver = execSync(`${nodeBin} --version`, { encoding: "utf8" }).trim();
+        // argv form (no shell, space-safe); capture stderr so it doesn't leak.
+        ver = execFileSync(nodeBin, ["--version"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
       } catch {
         // keep "?"
       }

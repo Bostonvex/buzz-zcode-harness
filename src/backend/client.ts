@@ -213,23 +213,41 @@ export class ZcodeBackend {
 
   // ---------- lifecycle ----------
 
-  /** Kill the whole zcode process group: SIGTERM → wait → SIGKILL if needed. */
-  close(): void {
+  /**
+   * Kill the whole zcode process group and wait for it to die.
+   *
+   * SIGTERM → wait up to 3s → SIGKILL if still alive. Mirrors the Python
+   * `os.killpg` + `proc.wait(3)` + SIGKILL escalation. Note `proc.killed` is
+   * NOT set by `process.kill(-pid)` (group signal), so we track liveness via
+   * `exitCode === null` instead. Async so the caller can `await` a full reap
+   * before the parent exits (an unref'd timer could be skipped on fast exit,
+   * leaving orphans).
+   */
+  async close(): Promise<void> {
+    const proc = this.proc;
+    if (!proc.pid) return;
+    // Already exited?
+    if (proc.exitCode !== null || proc.signalCode) return;
     try {
-      if (this.proc.pid && !this.proc.killed) {
-        process.kill(-this.proc.pid, "SIGTERM");
-        this.proc.once("exit", () => undefined);
-        // Force-kill after 3s if still alive.
-        setTimeout(() => {
-          try {
-            if (!this.proc.killed && this.proc.pid) process.kill(-this.proc.pid, "SIGKILL");
-          } catch {
-            // already gone
-          }
-        }, 3000).unref();
-      }
+      process.kill(-proc.pid, "SIGTERM");
     } catch {
-      // process group already gone or we lack permission
+      return; // group already gone
+    }
+    // Wait up to 3s for a clean exit.
+    const exited = await new Promise<boolean>((resolve) => {
+      const done = () => resolve(true);
+      proc.once("exit", done);
+      setTimeout(() => {
+        proc.removeListener("exit", done);
+        resolve(false);
+      }, 3000);
+    });
+    if (exited) return;
+    // Still alive → SIGKILL the whole group.
+    try {
+      if (proc.pid && proc.exitCode === null) process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      // already gone
     }
   }
 

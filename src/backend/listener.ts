@@ -17,6 +17,14 @@ import type { ZcodeEvent, ZcodeProjection, ZcodeSnapshot, ZcodeSubscribeResult }
 /** ID generator function (the server's `_next_id`). */
 export type NextId = () => number;
 
+/** A pending pollEvent consumer. `done` is set once the promise has settled
+ *  (event delivered or timeout fired) so a late event skips it. */
+interface Waiter {
+  done: boolean;
+  resolve: (ev: ZcodeEvent | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class EventStreamListener {
   private readonly backend: ZcodeBackend;
   readonly sid: string;
@@ -24,7 +32,7 @@ export class EventStreamListener {
   lastSeq = 0;
   subscribed = false;
   private readonly queue: ZcodeEvent[] = [];
-  private readonly waiters: Array<(ev: ZcodeEvent | null) => void> = [];
+  private readonly waiters: Waiter[] = [];
 
   constructor(backend: ZcodeBackend, zcodeSid: string) {
     this.backend = backend;
@@ -62,9 +70,14 @@ export class EventStreamListener {
   /** Called by the backend reader when a `session/event` arrives. */
   handleEvent(event: ZcodeEvent): void {
     if (event.seq > this.lastSeq) this.lastSeq = event.seq;
-    const waiter = this.waiters.shift();
+    // Drop waiters that already timed out (their promise settled with null) so
+    // a late event never lands on a dead promise — that would silently drop it.
+    let waiter = this.waiters.shift();
+    while (waiter && waiter.done) waiter = this.waiters.shift();
     if (waiter) {
-      waiter(event);
+      waiter.done = true;
+      clearTimeout(waiter.timer);
+      waiter.resolve(event);
     } else {
       this.queue.push(event);
     }
@@ -72,22 +85,27 @@ export class EventStreamListener {
 
   /**
    * Wait for the next event, resolving once one arrives or `timeoutMs` elapses
-   * (resolves null on timeout). Events arriving with no waiter are queued.
+   * (resolves null on timeout). Events arriving with no active waiter are
+   * queued. A timed-out waiter is marked `done` so a later event skips it
+   * instead of being silently dropped on a settled promise.
    */
   pollEvent(timeoutMs = 500): Promise<ZcodeEvent | null> {
     const queued = this.queue.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        const idx = this.waiters.indexOf(resolve);
+      const waiter: Waiter = {
+        done: false,
+        resolve,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      };
+      waiter.timer = setTimeout(() => {
+        if (waiter.done) return;
+        waiter.done = true;
+        const idx = this.waiters.indexOf(waiter);
         if (idx >= 0) this.waiters.splice(idx, 1);
         resolve(null);
       }, timeoutMs);
-      const wrapped = (ev: ZcodeEvent | null) => {
-        clearTimeout(timer);
-        resolve(ev);
-      };
-      this.waiters.push(wrapped);
+      this.waiters.push(waiter);
     });
   }
 

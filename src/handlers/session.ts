@@ -18,10 +18,18 @@ import type {
   ZcodeListResult,
   ZcodeMessage,
   ZcodeMessagesResult,
+  ZcodeSnapshot,
 } from "../backend/types.js";
-import { EventTranslator, formatTurnError, ProjectionDiffer } from "../translators/index.js";
+import {
+  buildDiffContent,
+  EventTranslator,
+  extractLocations,
+  formatTurnError,
+  ProjectionDiffer,
+} from "../translators/index.js";
+import type { InternalEvent } from "../translators/index.js";
 import { log } from "../utils.js";
-import type { ZcodeAcpServer } from "../server.js";
+import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk } from "./io.js";
 
@@ -213,13 +221,14 @@ export async function prompt(
   const text = extractPromptText(params.prompt);
   if (!text) throw new Error("empty prompt");
 
-  // Register the pending turn.
-  const turn: { zcodeSid: string; cancelled: boolean } = { zcodeSid, cancelled: false };
-  server.pendingTurns.set(requestId, {
+  // Register the pending turn. This same object is mutated by cancel(); the
+  // turn loop checks `.cancelled` on the SAME reference, so cancel propagates.
+  const turn: PendingTurn = {
     zcodeSid,
     cancelled: false,
     permResponses: new Map(),
-  });
+  };
+  server.pendingTurns.set(requestId, turn);
 
   const listener = new EventStreamListener(backend, zcodeSid);
   const monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
@@ -268,7 +277,12 @@ export async function prompt(
   }
 }
 
-/** `session/cancel` → mark the pending turn cancelled + forward session/stop. */
+/**
+ * `session/cancel` → mark the pending turn cancelled. The turn loop observes
+ * the flag and forwards `session/stop` itself (mirrors Python: cancel only
+ * sets the flag; stop is sent by `_run_event_turn`). Eagerly sending stop
+ * here would race with a turn that already completed.
+ */
 export async function cancel(
   server: ZcodeAcpServer,
   params: acp.CancelNotification,
@@ -276,9 +290,11 @@ export async function cancel(
   const zcodeSid = server.resolveSid(params.sessionId);
   if (!zcodeSid) return;
   for (const [, turn] of server.pendingTurns) {
-    if (turn.zcodeSid === zcodeSid) turn.cancelled = true;
+    if (turn.zcodeSid === zcodeSid) {
+      turn.cancelled = true;
+      break; // one turn per session at a time
+    }
   }
-  server.ensureBackend().notify("session/stop", { sessionId: zcodeSid });
   log(`session/cancel → ${zcodeSid}`);
 }
 
@@ -347,7 +363,7 @@ async function runEventTurn(
   cx: acp.AgentContext,
   acpSid: string,
   chunkMsgId: string,
-  turn: { zcodeSid: string; cancelled: boolean },
+  turn: PendingTurn,
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
   const translator = new EventTranslator();
@@ -380,7 +396,7 @@ async function runEventTurn(
         if (proj?.status === "idle") {
           // Turn completed but the event was lost.
           if (!emittedText) {
-            const reply = await fetchLastReply(server, turn.zcodeSid);
+            const reply = await fetchLastReply(server, turn.zcodeSid, differ);
             if (reply) {
               await sendTextChunk(cx, acpSid, reply, chunkMsgId);
             } else if (!emittedOutput) {
@@ -407,6 +423,31 @@ async function runEventTurn(
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
     }
 
+    // Edit/Write diff eager dispatch: on tool.updated result for Edit/Write,
+    // grab the structured patch from session/messages immediately (don't wait
+    // for turn completion — model rate-limiting could delay it indefinitely).
+    if (ev.type === "tool.updated") {
+      const payload = ev.payload as { kind?: string; toolCallId?: string; toolName?: string };
+      if (
+        payload.kind === "result" &&
+        payload.toolCallId &&
+        (payload.toolName === "Edit" ||
+          payload.toolName === "Write" ||
+          payload.toolName === "edit" ||
+          payload.toolName === "write")
+      ) {
+        await dispatchEditDiff(
+          server,
+          cx,
+          acpSid,
+          turn.zcodeSid,
+          payload.toolCallId,
+          differ,
+          chunkMsgId,
+        );
+      }
+    }
+
     // Sync translator → differ seen-tool-ids so the turn-completion differ.diff
     // doesn't re-emit tools the event path already sent (which would clear
     // Bash terminal output via a content-less ToolCallNew through the terminal
@@ -416,14 +457,28 @@ async function runEventTurn(
     }
 
     if (translator.turnDone) {
+      // Cancel signalled via turn.completed(resultType:"cancelled").
+      if (translator.turnResultType === "cancelled") {
+        backend.notify("session/stop", { sessionId: turn.zcodeSid });
+        return { stopReason: "cancelled" };
+      }
       if (translator.turnFailed) {
         backend.notify("session/stop", { sessionId: turn.zcodeSid });
         throw new RequestError(-32603, formatTurnError(translator.turnError));
       }
       // Fallback: if no text streamed, surface the last assistant reply.
       if (!emittedText) {
-        const reply = await fetchLastReply(server, turn.zcodeSid);
+        const reply = await fetchLastReply(server, turn.zcodeSid, differ);
         if (reply) await sendTextChunk(cx, acpSid, reply, chunkMsgId);
+      }
+      // Turn-completion diff: emits PlanUpdate (todos) + final usage_update,
+      // reconciles any snapshot-only events. Text/tools are deduped by
+      // seenMessageIds / markToolSeen so they aren't re-emitted.
+      const snapshot = await buildSnapshot(server, turn.zcodeSid);
+      const completionEvents = differ.diff(snapshot);
+      for (const iev of completionEvents) {
+        if (iev.kind === "TextDelta") emittedText = true;
+        await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
       }
       return { stopReason: "end_turn" };
     }
@@ -434,22 +489,102 @@ async function runEventTurn(
   return { stopReason: "max_turn_requests" };
 }
 
-/** Fetch the last assistant message text as a fallback for lost text events. */
-async function fetchLastReply(server: ZcodeAcpServer, zcodeSid: string): Promise<string | null> {
-  const messages = await fetchMessages(server, zcodeSid);
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m) continue;
-    if (m.info?.role !== "assistant") continue;
-    for (let j = (m.parts ?? []).length - 1; j >= 0; j--) {
-      const p = m.parts[j];
-      if (p && typeof p === "object" && (p as { type?: string }).type === "text") {
-        const text = (p as { text?: string }).text ?? "";
-        if (text.trim()) return text;
+/**
+ * Fetch the last assistant message text as a fallback for lost text events.
+ *
+ * Retries up to 4 times with a short delay because zcode has a data-consistency
+ * window after `status:idle` where `session/messages` may not yet include the
+ * just-finished reply. Skips assistant messages the differ already saw (by
+ * dedup key) so a previous turn's reply is never re-emitted as this turn's.
+ */
+async function fetchLastReply(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  differ: ProjectionDiffer,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const messages = await fetchMessages(server, zcodeSid);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m) continue;
+      if (m.info?.role !== "assistant") continue;
+      // Skip messages the differ already processed (previous turns).
+      if (differ.hasSeenMessage(m)) continue;
+      for (let j = (m.parts ?? []).length - 1; j >= 0; j--) {
+        const p = m.parts[j];
+        if (p && typeof p === "object" && (p as { type?: string }).type === "text") {
+          const text = (p as { text?: string }).text ?? "";
+          if (text.trim()) return text;
+        }
       }
     }
+    if (attempt < 3) await sleep(400);
   }
   return null;
+}
+
+/** Build a {projection, messages, todos} snapshot from session/messages + session/read. */
+async function buildSnapshot(server: ZcodeAcpServer, zcodeSid: string): Promise<ZcodeSnapshot> {
+  const backend = server.ensureBackend();
+  const [msgs, readResp] = await Promise.all([
+    fetchMessages(server, zcodeSid),
+    backend.request(server.nextId(), "session/read", { sessionId: zcodeSid }, 8000),
+  ]);
+  const read = (readResp.result ?? {}) as {
+    projection?: ZcodeSnapshot["projection"];
+    todos?: unknown[];
+    todoGroups?: { entries?: unknown[]; todos?: unknown[] };
+  };
+  const todos = read.todos ?? read.todoGroups?.entries ?? read.todoGroups?.todos ?? [];
+  return { projection: read.projection, messages: msgs, todos };
+}
+
+/**
+ * Edit/Write result → grab the structured patch from session/messages and emit
+ * a ToolCallUpdate with diff content immediately (don't wait for turn
+ * completion — model rate-limiting could delay it indefinitely). Always marks
+ * the tool seen in the differ so turn-completion diff won't re-emit it.
+ */
+async function dispatchEditDiff(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+  callId: string,
+  differ: ProjectionDiffer,
+  chunkMsgId: string,
+): Promise<void> {
+  const messages = await fetchMessages(server, zcodeSid);
+  for (const m of messages) {
+    for (const p of m.parts ?? []) {
+      if (!p || typeof p !== "object") continue;
+      const part = p as Record<string, unknown>;
+      const partCallId = String(part["callID"] ?? part["callId"] ?? "");
+      if (partCallId !== callId) continue;
+      const state = (part["state"] as Record<string, unknown>) ?? {};
+      const display = (state["metadata"] as Record<string, unknown> | undefined)?.["display"];
+      const diffContent = buildDiffContent(display);
+      const locations = extractLocations(String(part["tool"] ?? ""), state["input"], display);
+      const ev: InternalEvent = {
+        kind: "ToolCallUpdate",
+        callId,
+        tool: String(part["tool"] ?? ""),
+        status: "completed",
+        diffContent: diffContent.length > 0 ? diffContent : undefined,
+        locations: locations.length > 0 ? locations : undefined,
+      };
+      if (diffContent.length > 0 || locations.length > 0) {
+        await dispatchEvent(server, cx, acpSid, ev, chunkMsgId);
+      }
+      differ.markToolSeen(callId);
+      return;
+    }
+  }
+  differ.markToolSeen(callId);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /** Send available commands after the response (Commit 8 fills slash handling). */

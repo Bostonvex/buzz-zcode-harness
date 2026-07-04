@@ -59,6 +59,12 @@ export class ProjectionDiffer {
     }
   }
 
+  /** Whether a message's dedup key has already been processed. */
+  hasSeenMessage(m: ZcodeMessage): boolean {
+    const key = this.messageDedupKey(m);
+    return key !== null && this.seenMessageIds.has(key);
+  }
+
   /**
    * Mark a tool call id as seen + completed. Used to sync state from the
    * EventTranslator so the next `diff()` won't re-emit a tool the event path
@@ -174,12 +180,31 @@ export class ProjectionDiffer {
       if (locs.length > 0) (newEv as { locations?: typeof locs }).locations = locs;
       events.push(newEv);
     } else if (status !== this.lastToolStatus.get(callId)) {
+      // Status transition on a seen tool. On completed/error, carry the rich
+      // payload (output / diff / content / locations) like the new-tool branch,
+      // so snapshot-path transitions aren't content-less.
       this.lastToolStatus.set(callId, status);
-      events.push({
+      const display = (state["metadata"] as Record<string, unknown> | undefined)?.["display"];
+      const update: InternalEvent = {
         kind: "ToolCallUpdate",
         callId,
+        tool: toolName,
         status: (TOOL_STATUS_MAP[status] ?? "other") as ToolCallStatus,
-      });
+      };
+      if (status === "completed" || status === "error") {
+        const outPayload = state["output"] ?? state["error"];
+        (update as { output?: string }).output = renderToolOutput(outPayload);
+        const diff = buildDiffContent(display);
+        if (diff.length > 0) {
+          (update as { diffContent?: typeof diff }).diffContent = diff;
+        } else {
+          const rc = buildResultContent(toolName, outPayload, status === "error");
+          if (rc.length > 0) (update as { content?: typeof rc }).content = rc;
+        }
+        const locs = extractLocations(toolName, state["input"], display);
+        if (locs.length > 0) (update as { locations?: typeof locs }).locations = locs;
+      }
+      events.push(update);
     }
     return events;
   }
@@ -190,7 +215,7 @@ export class ProjectionDiffer {
     if (msgId) return msgId;
     const role = info.role ?? "?";
     try {
-      const sig = JSON.stringify(m.parts ?? []).slice(0, 200);
+      const sig = stableStringify(m.parts ?? []).slice(0, 200);
       return `__fallback::${role}::${sig}`;
     } catch {
       return `__fallback::${role}::${String(m.parts).slice(0, 200)}`;
@@ -198,11 +223,27 @@ export class ProjectionDiffer {
   }
 }
 
-/** Deterministic JSON string (sorted keys) for signature comparison. */
+/** Deterministic JSON string with recursively sorted object keys, mirroring
+ *  Python's `json.dumps(..., sort_keys=True)` so signatures are stable regardless
+ *  of key insertion order. */
 function stableStringify(value: unknown): string {
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(sortKeys(value));
   } catch {
     return String(value);
   }
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return Object.keys(obj)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, k) => {
+        acc[k] = sortKeys(obj[k]);
+        return acc;
+      }, {});
+  }
+  return value;
 }
