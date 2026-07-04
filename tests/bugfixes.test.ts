@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
+import { flattenTodos } from "../src/handlers/session.js";
 import { CONFIG_META } from "../src/utils.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
 
@@ -103,5 +104,31 @@ describe("Bug 5: usage fallback treats contextUsed=0 as falsy", () => {
       { kind: "UsageDelta"; used: number; size: number } | undefined;
     expect(usage).toBeDefined();
     expect(usage?.used).toBe(5000); // contextUsed=0 falls back to totalTokenCount
+  });
+});
+
+describe("Bug #4: flattenTodos flattens todoGroups list (not single object)", () => {
+  it("prefers top-level todos when non-empty", () => {
+    const out = flattenTodos([{ content: "a" }], [{ entries: [{ content: "b" }] }]);
+    expect(out).toEqual([{ content: "a" }]);
+  });
+
+  it("flattens todoGroups[].entries when top-level todos is empty", () => {
+    const out = flattenTodos([], [
+      { entries: [{ content: "a" }, { content: "b" }] },
+      { entries: [{ content: "c" }] },
+    ]);
+    expect(out).toEqual([{ content: "a" }, { content: "b" }, { content: "c" }]);
+  });
+
+  it("flattens todoGroups[].todos (alternate key) when entries absent", () => {
+    const out = flattenTodos(undefined, [{ todos: [{ content: "x" }] }]);
+    expect(out).toEqual([{ content: "x" }]);
+  });
+
+  it("returns empty when both todos and todoGroups are empty/absent", () => {
+    expect(flattenTodos(undefined, undefined)).toEqual([]);
+    expect(flattenTodos([], [])).toEqual([]);
+    expect(flattenTodos([], undefined)).toEqual([]);
   });
 });

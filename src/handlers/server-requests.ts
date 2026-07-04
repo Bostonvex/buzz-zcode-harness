@@ -40,7 +40,7 @@ import {
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
 import { log } from "../utils.js";
-import type { ZcodeAcpServer } from "../server.js";
+import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
 
 /** A dedup entry tracking reannounced zcode ids + the cached result. */
@@ -69,6 +69,7 @@ export async function handleServerRequests(
   backend: ZcodeBackend,
   cx: acp.AgentContext,
   acpSid: string,
+  turn?: PendingTurn,
 ): Promise<boolean> {
   const pending = getPendingInteractions(server);
   let handled = false;
@@ -77,7 +78,7 @@ export async function handleServerRequests(
     const req = backend.pollServerRequests().shift() ?? null;
     if (!req) return handled;
     handled = true;
-    await handleOne(server, backend, cx, acpSid, req, pending);
+    await handleOne(server, backend, cx, acpSid, req, pending, turn);
   }
 }
 
@@ -88,6 +89,7 @@ async function handleOne(
   acpSid: string,
   req: ServerRequest,
   pending: Map<string, DedupEntry>,
+  turn?: PendingTurn,
 ): Promise<void> {
   const method = req.method;
   const zcodeReqId = req.id;
@@ -132,9 +134,10 @@ async function handleOne(
       cx,
       acpSid,
       params as ZcodeInteractionUserInputParams,
+      turn,
     );
   } else {
-    zcodeResp = await handleSinglePermission(server, cx, acpSid, params, epm, perm);
+    zcodeResp = await handleSinglePermission(server, cx, acpSid, params, epm, perm, turn);
   }
 
   // Reply to the first zcode id + all reannounced ones, and cache for late reannounces.
@@ -150,6 +153,7 @@ async function handleSinglePermission(
     ZcodeInteractionPermissionParams | ZcodeInteractionUserInputParams | Record<string, unknown>,
   epm: boolean,
   perm: boolean,
+  turn?: PendingTurn,
 ): Promise<ZcodeInteractionResponse> {
   const p = params as ZcodeInteractionPermissionParams & ZcodeInteractionUserInputParams;
   // Emit a tool_call first so Zed renders the popup (it requires the toolCallId
@@ -193,6 +197,8 @@ async function handleSinglePermission(
       "elicitation/create",
       formParams,
       "elicitation/create",
+      undefined,
+      turn,
     );
     if (elicResp === null) {
       return { action: "decline", reason: "elicitation failed" };
@@ -214,6 +220,8 @@ async function handleSinglePermission(
     "session/request_permission",
     acpParams,
     "request_permission",
+    undefined,
+    turn,
   );
   if (acpResp === null) {
     return { action: "decline", reason: "timeout or cancelled" };
@@ -234,6 +242,7 @@ async function handleAskUserQuestion(
   cx: acp.AgentContext,
   acpSid: string,
   params: ZcodeInteractionUserInputParams,
+  turn?: PendingTurn,
 ): Promise<ZcodeInteractionResponse> {
   const qs = splitAskUserQuestions(params);
   if (qs === null) {
@@ -245,7 +254,7 @@ async function handleAskUserQuestion(
 
   // Preferred path: form-based elicitation renders all questions in one form.
   if (server.supportsElicitationForm()) {
-    return handleAskUserViaElicitation(server, cx, acpSid, params, toolCallId, rawInput);
+    return handleAskUserViaElicitation(server, cx, acpSid, params, toolCallId, rawInput, turn);
   }
 
   // Fallback path: per-question request_permission popups.
@@ -258,7 +267,7 @@ async function handleAskUserQuestion(
       await emitAskToolCall(cx, acpSid, toolCallId, idx, q.question, rawInput);
       const acpParams = buildAskUserAcpParams(params, acpSid, q.options);
       acpParams.toolCall.toolCallId = `${toolCallId}_${idx}`;
-      const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, q.question);
+      const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, q.question, turn);
       const selected = parseAskUserResponse(resp);
       if (selected === null) {
         log(`  ⚠ AskUserQuestion [${idx + 1}] skip/cancel/timeout, declining`);
@@ -282,7 +291,7 @@ async function handleAskUserQuestion(
         await emitAskToolCall(cx, acpSid, toolCallId, `${idx}_${sub}`, promptText, rawInput);
         const acpParams = buildAskUserAcpParams(params, acpSid, pair);
         acpParams.toolCall.toolCallId = `${toolCallId}_${idx}_${sub}`;
-        const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, label);
+        const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, label, turn);
         if (parseAskUserResponse(resp) === "yes") {
           picked.push(label);
           log(`  ✓ AskUserQuestion [${idx + 1}] multi picked: ${label}`);
@@ -312,6 +321,7 @@ async function handleAskUserViaElicitation(
   params: ZcodeInteractionUserInputParams,
   toolCallId: string,
   rawInput: unknown,
+  turn?: PendingTurn,
 ): Promise<ZcodeInteractionResponse> {
   const toolName = "AskUserQuestion";
   await sendSessionUpdate(cx, acpSid, {
@@ -330,6 +340,8 @@ async function handleAskUserViaElicitation(
     "elicitation/create",
     formParams,
     "elicitation/create",
+    undefined,
+    turn,
   );
   if (acpResp === null) {
     return { action: "decline", reason: "elicitation failed" };
@@ -376,6 +388,7 @@ async function askOnce(
   _qNum: number,
   _qTotal: number,
   _label: string,
+  turn?: PendingTurn,
 ): Promise<unknown> {
   const acpReqId = _server.nextId();
   log(`  ⟳ AskUserQuestion forwarding session/request_permission (acp_id=${acpReqId})`);
@@ -384,6 +397,8 @@ async function askOnce(
     "session/request_permission",
     acpParams,
     "request_permission",
+    undefined,
+    turn,
   );
 }
 
@@ -400,11 +415,17 @@ async function askOnce(
 const INTERACTION_TIMEOUT_MS = 600_000;
 
 /**
- * Send a client-side request with a timeout. Resolves to the client response,
- * or `null` on timeout/error (callers treat null as decline). The underlying
- * `cx.request` promise stays pending after a timeout (the SDK has no abort),
- * but we no longer await it; it settles naturally when the client eventually
- * responds or the connection closes.
+ * Send a client-side request with a timeout and turn-cancel awareness. Resolves
+ * to the client response, or `null` on timeout/error/cancel (callers treat null
+ * as decline). The underlying `cx.request` promise stays pending after a
+ * timeout/cancel (the SDK has no abort), but we no longer await it; it settles
+ * naturally when the client eventually responds or the connection closes.
+ *
+ * Turn cancel: while awaiting the client response we poll `turn.cancelled`
+ * every 100ms (mirrors Python `_await_client_response`, which drains + checks
+ * cancel every 0.1s). Without this, a user pressing stop during a permission
+ * popup would be ignored until the client responds or 600s elapses, because the
+ * turn loop's `await handleServerRequests` blocks here.
  */
 async function requestWithTimeout(
   cx: acp.AgentContext,
@@ -412,25 +433,43 @@ async function requestWithTimeout(
   params: unknown,
   label: string,
   timeoutMs = INTERACTION_TIMEOUT_MS,
+  turn?: PendingTurn,
 ): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelTimer: ReturnType<typeof setInterval> | undefined;
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
       log(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
       resolve(null);
     }, timeoutMs);
   });
-  try {
-    const resp = await Promise.race([
-      cx.request(method, params as never).catch((e: unknown) => {
-        log(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
+  const racers: Array<Promise<unknown>> = [
+    cx.request(method, params as never).catch((e: unknown) => {
+      log(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }),
+    timeout,
+  ];
+  // Race a cancel poll so the user can abort a pending popup. Resolves null on
+  // cancel; callers already treat null as decline. Only added when a turn is
+  // available (turn-less callers, e.g. tests, skip cancel awareness).
+  if (turn) {
+    racers.push(
+      new Promise<null>((resolve) => {
+        cancelTimer = setInterval(() => {
+          if (turn.cancelled) {
+            log(`  ⚠ ${label} aborted (turn cancelled)`);
+            resolve(null);
+          }
+        }, 100);
       }),
-      timeout,
-    ]);
-    return resp;
+    );
+  }
+  try {
+    return await Promise.race(racers);
   } finally {
     if (timer) clearTimeout(timer);
+    if (cancelTimer) clearInterval(cancelTimer);
   }
 }
 

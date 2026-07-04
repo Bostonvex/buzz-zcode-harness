@@ -124,7 +124,7 @@ export interface ZcodeReadResult {
   projection?: ZcodeProjection;
   settings?: Record<string, unknown>;
   todos?: unknown[];
-  todoGroups?: { entries?: unknown[]; todos?: unknown[] };
+  todoGroups?: Array<{ entries?: unknown[]; todos?: unknown[] }>;
 }
 
 // ---------- interaction (server→client) ----------

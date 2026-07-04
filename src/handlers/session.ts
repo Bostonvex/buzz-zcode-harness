@@ -469,8 +469,9 @@ async function runEventTurn(
 
   while (Date.now() - lastProgress < NO_PROGRESS_MS) {
     // Drain + handle server→client requests (interaction/*). Refreshes the
-    // no-progress timer when any are handled.
-    if (await handleServerRequests(server, backend, cx, acpSid)) {
+    // no-progress timer when any are handled. Pass `turn` so interaction
+    // requests become turn-cancel aware (user stop aborts pending popups).
+    if (await handleServerRequests(server, backend, cx, acpSid, turn)) {
       lastProgress = Date.now();
     }
 
@@ -619,6 +620,26 @@ async function fetchLastReply(
   return null;
 }
 
+/**
+ * Flatten the todos payload from `session/read`. Prefers the top-level `todos`;
+ * when empty, flattens `todoGroups` — the real backend dump carries todos as a
+ * list of groups (each with `entries` or `todos`), not a single object. Mirrors
+ * Python `_build_snapshot`. Exported for unit testing.
+ */
+export function flattenTodos(
+  todos: unknown[] | undefined,
+  todoGroups: Array<{ entries?: unknown[]; todos?: unknown[] }> | undefined,
+): unknown[] {
+  const top = todos ?? [];
+  if (top.length > 0 || !Array.isArray(todoGroups)) return top;
+  let flat: unknown[] = [];
+  for (const g of todoGroups) {
+    if (!g) continue;
+    flat = flat.concat(g.entries ?? g.todos ?? []);
+  }
+  return flat;
+}
+
 /** Build a {projection, messages, todos} snapshot from session/messages + session/read. */
 async function buildSnapshot(server: ZcodeAcpServer, zcodeSid: string): Promise<ZcodeSnapshot> {
   const backend = server.ensureBackend();
@@ -629,9 +650,9 @@ async function buildSnapshot(server: ZcodeAcpServer, zcodeSid: string): Promise<
   const read = (readResp.result ?? {}) as {
     projection?: ZcodeSnapshot["projection"];
     todos?: unknown[];
-    todoGroups?: { entries?: unknown[]; todos?: unknown[] };
+    todoGroups?: Array<{ entries?: unknown[]; todos?: unknown[] }>;
   };
-  const todos = read.todos ?? read.todoGroups?.entries ?? read.todoGroups?.todos ?? [];
+  const todos = flattenTodos(read.todos, read.todoGroups);
   return { projection: read.projection, messages: msgs, todos };
 }
 
