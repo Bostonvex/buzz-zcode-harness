@@ -4,9 +4,8 @@
  *
  * Each event kind is serialised here so the translation layers stay focused
  * on producing the internal shape. The Bash terminal-output protocol (the
- * 2-notification split: terminal_output + terminal_exit) lands in Commit 5;
- * for now the terminal path is wired but emits the standard single update so
- * the server is end-to-end functional.
+ * 2-notification split: terminal_output + terminal_exit) is fully implemented
+ * below in dispatchTerminalUpdate.
  */
 
 import { randomUUID } from "node:crypto";

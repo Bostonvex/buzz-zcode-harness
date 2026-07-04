@@ -35,8 +35,9 @@ import {
   steer,
   updateRuntimeModelConfig,
 } from "./handlers/extensions.js";
+import { sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { ZcodeAcpServer } from "./server.js";
-import { AGENT_INFO, log } from "./utils.js";
+import { AGENT_INFO, SLASH_COMMANDS, log } from "./utils.js";
 
 async function main(): Promise<void> {
   // stdout is the outbound channel to the client; stdin is inbound.
@@ -77,10 +78,22 @@ async function main(): Promise<void> {
   acp
     .agent({ name: AGENT_INFO.name })
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
-    .onRequest("session/new", (ctx) => newSession(server, ctx.params))
+    .onRequest("session/new", async (ctx) => {
+      const result = await newSession(server, ctx.params);
+      sendAvailableCommandsDeferred(ctx.client, result.sessionId, SLASH_COMMANDS);
+      return result;
+    })
     .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
-    .onRequest("session/resume", (ctx) => resumeSession(server, ctx.params))
-    .onRequest("session/load", (ctx) => loadSession(server, ctx.params, ctx.client))
+    .onRequest("session/resume", async (ctx) => {
+      const result = await resumeSession(server, ctx.params);
+      sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, SLASH_COMMANDS);
+      return result;
+    })
+    .onRequest("session/load", async (ctx) => {
+      const result = await loadSession(server, ctx.params, ctx.client);
+      sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, SLASH_COMMANDS);
+      return result;
+    })
     .onRequest("session/prompt", (ctx) =>
       prompt(server, ctx.params, ctx.client, ctx.requestId as number),
     )

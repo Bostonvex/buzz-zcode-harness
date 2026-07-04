@@ -85,7 +85,6 @@ export async function newSession(
     traceId: session.traceId,
   });
 
-  void sendAvailableCommandsDeferred(server, sid);
   return {
     sessionId: sid,
     modes: await buildModes(server, sid),
@@ -118,7 +117,7 @@ export async function listSessions(
   return { sessions };
 }
 
-/** `session/resume` → zcode `session/resume` (+ runtimeModel overlay in Commit 7). */
+/** `session/resume` → zcode `session/resume` (with runtimeModel overlay for resumed sessions). */
 export async function resumeSession(
   server: ZcodeAcpServer,
   params: acp.ResumeSessionRequest,
@@ -141,8 +140,7 @@ export async function resumeSession(
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
 
   server.sessionMap.set(targetSid, targetSid);
-  log(`session/resume → ${targetSid}`);
-  void sendAvailableCommandsDeferred(server, targetSid);
+  log(`session/resume -> ${targetSid}`);
   return {
     modes: await buildModes(server, targetSid),
     configOptions: await buildConfigOptions(server, targetSid),
@@ -246,7 +244,6 @@ export async function loadSession(
   // Initial usage_update so the editor shows the context bar immediately.
   await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
 
-  void sendAvailableCommandsDeferred(server, targetSid);
   return {
     modes: await buildModes(server, targetSid),
     configOptions: await buildConfigOptions(server, targetSid),
@@ -680,11 +677,4 @@ async function dispatchEditDiff(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Send available commands after the response (Commit 8 fills slash handling). */
-function sendAvailableCommandsDeferred(_server: ZcodeAcpServer, _acpSid: string): Promise<void> {
-  // Stub: the real deferred send (after the response is written) needs the
-  // response/id coordination added when index.ts wires the full handler set.
-  return Promise.resolve();
 }

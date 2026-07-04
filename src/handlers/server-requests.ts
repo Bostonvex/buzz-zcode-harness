@@ -28,11 +28,15 @@ import {
   acpPermissionResponseToExitPlanMode,
   acpPermissionResponseToZcode,
   buildAskUserAcpParams,
+  buildAskUserElicitationForm,
+  buildExitPlanModeElicitationForm,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
+  parseAskUserElicitationResponse,
   parseAskUserResponse,
+  parseExitPlanModeElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
@@ -177,6 +181,26 @@ async function handleSinglePermission(
   }
   await sendSessionUpdate(cx, acpSid, tcUpdate);
 
+  // ExitPlanMode: prefer elicitation form when the client supports it.
+  if (epm && server.supportsElicitationForm()) {
+    const formParams = buildExitPlanModeElicitationForm(
+      p as ZcodeInteractionUserInputParams,
+      acpSid,
+    );
+    log(`  ⟳ ExitPlanMode forwarding elicitation/create (form)`);
+    const elicResp = await cx
+      .request("elicitation/create", formParams as never)
+      .catch((e: unknown) => {
+        log(`  ⚠ elicitation/create failed: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+    if (elicResp === null) {
+      return { action: "decline", reason: "elicitation failed" };
+    }
+    return parseExitPlanModeElicitationResponse(elicResp) as ZcodeInteractionResponse;
+  }
+
+  // Tool auth, or ExitPlanMode without elicitation: use request_permission.
   const acpParams = perm
     ? zcodePermissionToAcp(p as ZcodeInteractionPermissionParams, acpSid)!
     : exitPlanModeToAcpPermission(p as ZcodeInteractionUserInputParams, acpSid);
@@ -218,6 +242,13 @@ async function handleAskUserQuestion(
   }
   const toolCallId = params.toolCallId ?? "";
   const rawInput = params.input;
+
+  // Preferred path: form-based elicitation renders all questions in one form.
+  if (server.supportsElicitationForm()) {
+    return handleAskUserViaElicitation(server, cx, acpSid, params, toolCallId, rawInput);
+  }
+
+  // Fallback path: per-question request_permission popups.
   const answers: Record<string, string> = {};
 
   for (let idx = 0; idx < qs.length; idx++) {
@@ -264,6 +295,51 @@ async function handleAskUserQuestion(
     }
   }
   log(`  ✓ AskUserQuestion all answered (${Object.keys(answers).length}), replying`);
+  return { action: "accept", content: { answers } };
+}
+
+/**
+ * AskUserQuestion via elicitation form — one form for all questions.
+ *
+ * When the client supports form-based elicitation, render a single form with
+ * one field per question instead of N sequential popups. Falls back to
+ * `decline` on any failure so the caller can degrade gracefully.
+ */
+async function handleAskUserViaElicitation(
+  _server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  params: ZcodeInteractionUserInputParams,
+  toolCallId: string,
+  rawInput: unknown,
+): Promise<ZcodeInteractionResponse> {
+  const toolName = "AskUserQuestion";
+  await sendSessionUpdate(cx, acpSid, {
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: "questions",
+    kind: "other",
+    status: "pending",
+    rawInput,
+    _meta: { claudeCode: { toolName } },
+  });
+  const formParams = buildAskUserElicitationForm(params, acpSid);
+  log(`  ⟳ AskUserQuestion forwarding elicitation/create (form, ${Object.keys(formParams.requestedSchema.properties).length} fields)`);
+  const acpResp = await cx
+    .request("elicitation/create", formParams as never)
+    .catch((e: unknown) => {
+      log(`  ⚠ elicitation/create failed: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    });
+  if (acpResp === null) {
+    return { action: "decline", reason: "elicitation failed" };
+  }
+  const answers = parseAskUserElicitationResponse(acpResp, params);
+  if (answers === null) {
+    log("  ⚠ AskUserQuestion elicitation declined/cancelled");
+    return { action: "decline", reason: "declined or cancelled" };
+  }
+  log(`  ✓ AskUserQuestion elicitation answered (${Object.keys(answers).length})`);
   return { action: "accept", content: { answers } };
 }
 

@@ -47,6 +47,23 @@ export function sendAvailableCommands(
   });
 }
 
+/**
+ * Send `available_commands_update` after a short delay so it lands after the
+ * session response. ACP clients initialize their session state machine on the
+ * response; a notification arriving earlier can be dropped, leaving the `/`
+ * completion menu empty. Mirrors the Python bridge's deferred-notification
+ * queue + 50ms drain. Fire-and-forget (returns void).
+ */
+export function sendAvailableCommandsDeferred(
+  cx: acp.AgentContext,
+  sessionId: string,
+  commands: ReadonlyArray<{ name: string; description: string }>,
+): void {
+  setTimeout(() => {
+    void sendAvailableCommands(cx, sessionId, commands);
+  }, 50);
+}
+
 /** Throw a JSON-RPC error from a handler (the SDK converts it to an error response). */
 export function throwError(code: number, message: string): never {
   throw new RequestError(code, message);

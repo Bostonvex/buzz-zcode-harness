@@ -215,3 +215,161 @@ export function parseAskUserResponse(acpResp: unknown): string | null {
   if (optionId.endsWith(":no")) return "no";
   return optionId;
 }
+
+// ---------- elicitation form (preferred when client supports it) ----------
+
+/**
+ * Build an elicitation form schema for an AskUserQuestion request.
+ *
+ * Each question becomes one property in the form:
+ *   - Single-select → string enum of labels
+ *   - Multi-select  → string array enum of labels
+ *
+ * When the client supports form-based elicitation, this lets the user answer
+ * all questions in one form rather than one popup per question.
+ */
+export function buildAskUserElicitationForm(
+  params: ZcodeInteractionUserInputParams,
+  acpSid: string,
+): {
+  mode: "form";
+  sessionId: string;
+  message: string;
+  requestedSchema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+} {
+  const questions = params.questions?.length ? params.questions : params.input?.questions ?? [];
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    if (!q || typeof q.question !== "string") continue;
+    const key = `q_${i}`;
+    const labels = (q.options ?? [])
+      .map((o) => o.label ?? o.value ?? "")
+      .filter((l) => l.length > 0);
+    if (labels.length === 0) continue;
+    if (q.multiSelect) {
+      properties[key] = {
+        type: "array",
+        items: { type: "string", enum: labels },
+        title: q.question,
+        description: q.question,
+      };
+    } else {
+      properties[key] = {
+        type: "string",
+        enum: labels,
+        title: q.question,
+        description: q.question,
+      };
+      required.push(key);
+    }
+  }
+  const message =
+    questions.length === 1
+      ? (questions[0]?.question ?? "Please answer the question.")
+      : `Please answer ${questions.length} questions.`;
+  return {
+    mode: "form",
+    sessionId: acpSid,
+    message,
+    requestedSchema: { type: "object", properties, required },
+  };
+}
+
+/**
+ * Parse an elicitation form response into the zcode answers map.
+ *
+ * Maps each `q_<i>` form field back to the original question text. Multi-select
+ * answers (arrays) are comma-joined to match the request_permission path's
+ * `"a, b"` format. Returns null if the user declined/cancelled.
+ */
+export function parseAskUserElicitationResponse(
+  acpResp: unknown,
+  params: ZcodeInteractionUserInputParams,
+): Record<string, string> | null {
+  if (!acpResp || typeof acpResp !== "object") return null;
+  const resp = acpResp as { action?: string; content?: Record<string, unknown> | null };
+  if (resp.action !== "accept" || !resp.content) return null;
+  const questions = params.questions?.length ? params.questions : params.input?.questions ?? [];
+  const answers: Record<string, string> = {};
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    if (!q || typeof q.question !== "string") continue;
+    const key = `q_${i}`;
+    const val = resp.content[key];
+    if (val == null) continue;
+    if (Array.isArray(val)) {
+      answers[q.question] = val.filter((v) => typeof v === "string").join(", ");
+    } else if (typeof val === "string") {
+      answers[q.question] = val;
+    }
+  }
+  return answers;
+}
+
+/**
+ * Build an elicitation form for ExitPlanMode (approve/reject).
+ *
+ * Uses a single required boolean-style enum so the client renders a clear
+ * approve/reject choice in the form UI.
+ */
+export function buildExitPlanModeElicitationForm(
+  params: ZcodeInteractionUserInputParams,
+  acpSid: string,
+): {
+  mode: "form";
+  sessionId: string;
+  message: string;
+  requestedSchema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+} {
+  const planText =
+    params.input && typeof params.input === "object"
+      ? ((params.input as { plan?: string }).plan ?? "")
+      : "";
+  const message = planText
+    ? `Ready to code?\n\n${planText}`
+    : "Ready to code?";
+  return {
+    mode: "form",
+    sessionId: acpSid,
+    message,
+    requestedSchema: {
+      type: "object",
+      properties: {
+        decision: {
+          type: "string",
+          enum: ["approve", "reject"],
+          title: "Decision",
+          description: "Approve to exit plan mode and start coding, or reject to keep planning.",
+        },
+      },
+      required: ["decision"],
+    },
+  };
+}
+
+/** Parse an ExitPlanMode elicitation response → zcode accept/decline. */
+export function parseExitPlanModeElicitationResponse(
+  acpResp: unknown,
+): { action: "accept" | "decline"; reason?: string } {
+  if (!acpResp || typeof acpResp !== "object") {
+    return { action: "decline", reason: "invalid client response" };
+  }
+  const resp = acpResp as { action?: string; content?: { decision?: string } | null };
+  if (resp.action !== "accept" || !resp.content) {
+    return { action: "decline", reason: "cancelled" };
+  }
+  if (resp.content.decision === "approve") {
+    return { action: "accept", content: { answer_0: "approve" } } as never;
+  }
+  return { action: "decline", reason: "rejected" };
+}

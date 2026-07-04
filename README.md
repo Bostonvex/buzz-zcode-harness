@@ -2,7 +2,7 @@
 
 A standalone [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) server that bridges the headless **ZCode** app-server to ACP-compatible editors such as [Zed](https://zed.dev) and JetBrains IDEs.
 
-The server launches the ZCode headless app-server (`zcode app-server --stdio`) as a subprocess, translates its internal event stream into ACP `session/update` notifications, and bridges ACP `session/request_permission` back to ZCode's interaction channel — so an editor gets a first-class, native coding-agent experience.
+The server launches the ZCode headless app-server (`zcode app-server --stdio`) as a subprocess, translates its internal event stream into ACP `session/update` notifications, and bridges ZCode's interaction channel to ACP — preferring `elicitation/create` when the client supports it, and falling back to `session/request_permission` otherwise — so an editor gets a first-class, native coding-agent experience.
 
 ## Status
 
@@ -64,17 +64,47 @@ pnpm test        # vitest
 pnpm format      # prettier on src/
 ```
 
+## Quick Start
+
+```bash
+# Install dependencies and build
+pnpm install
+pnpm build
+
+# Start the server (manual testing)
+node dist/index.js
+```
+
+Configure your ACP client (e.g. Zed, JetBrains) to point to `dist/index.js` — see **Configure Zed** below.
+
 ## Architecture
 
 The server is organised in layers that mirror the ACP protocol:
 
 - `backend/` — ZCode subprocess client: spawn, reader-loop multiplexer, event-stream listener, sync request/response
 - `translators/` — turn ZCode events into ACP `session/update` notifications (event streaming + snapshot diff)
-- `interaction/` — bridge ZCode `interaction/*` server requests to ACP `session/request_permission` (tool auth, ExitPlanMode, AskUserQuestion)
+- `interaction/` — bridge ZCode `interaction/*` server requests to ACP, preferring `elicitation/create` and falling back to `session/request_permission` (tool auth, ExitPlanMode, AskUserQuestion)
 - `handlers/` — ACP method handlers (`session/new`, `session/prompt`, ...) and the turn engine
 - `config/` — model / mode / thought-level configOptions and runtime model switching
 - `server.ts` — shared state and handler registration
 - `index.ts` — stdio wiring via the ACP SDK
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture documentation.
+
+## Version Compatibility
+
+| ZCode CLI version | Support | Notes |
+|:-----------------:|:-------:|------|
+| **>= 0.15.0** | Full | All extension methods available |
+| **>= 0.14.8** | Full | Event-stream push, all extension methods |
+| **< 0.14.8** | Incompatible | Event-stream subscription unavailable |
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) — event stream, dual-path deduplication, module responsibilities
+- [Protocol](docs/PROTOCOL.md) — ZCode JSON-RPC protocol details
+- [Development](docs/DEVELOPMENT.md) — local development, debugging, adding extension methods
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — common-issue troubleshooting
 
 ## License
 

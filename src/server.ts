@@ -50,7 +50,7 @@ export class ZcodeAcpServer {
     string,
     import("./translators/projection-differ.js").ProjectionDiffer
   >();
-  /** Per-session model cache (Commit 7). */
+  /** Per-session model cache for configOptions model dropdown. */
   readonly modelCache = new Map<string, string>();
   /** Monotonic id counter; base 10_000_000 to avoid collisions with zcode-originated ids. */
   private msgCounter = 10_000_000;
@@ -78,6 +78,16 @@ export class ZcodeAcpServer {
   supportsTerminalOutput(): boolean {
     const meta = this.clientCapabilities._meta ?? {};
     return meta["terminal_output"] === true;
+  }
+
+  /**
+   * Whether the client supports form-based elicitation (`clientCapabilities.
+   * elicitation.form`). When true, AskUserQuestion / ExitPlanMode can use the
+   * richer `elicitation/create` form UI; otherwise they fall back to
+   * `session/request_permission`.
+   */
+  supportsElicitationForm(): boolean {
+    return this.clientCapabilities.elicitation?.form != null;
   }
 
   /** Handle `initialize`: negotiate version + declare agent capabilities. */
