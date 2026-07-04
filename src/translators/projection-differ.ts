@@ -59,6 +59,17 @@ export class ProjectionDiffer {
     }
   }
 
+  /**
+   * Mark a tool call id as seen + completed. Used to sync state from the
+   * EventTranslator so the next `diff()` won't re-emit a tool the event path
+   * already dispatched (which would clear Bash terminal output via a
+   * content-less ToolCallNew through the terminal path).
+   */
+  markToolSeen(callId: string): void {
+    this.seenToolIds.add(callId);
+    this.lastToolStatus.set(callId, "completed");
+  }
+
   /** Reset per-turn flags (does NOT reset seenMessageIds). */
   resetTurn(): void {
     this.emittedTextThisTurn = false;

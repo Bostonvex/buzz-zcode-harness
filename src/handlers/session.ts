@@ -19,7 +19,7 @@ import type {
   ZcodeMessage,
   ZcodeMessagesResult,
 } from "../backend/types.js";
-import { EventTranslator, formatTurnError } from "../translators/index.js";
+import { EventTranslator, formatTurnError, ProjectionDiffer } from "../translators/index.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
@@ -224,6 +224,12 @@ export async function prompt(
   const listener = new EventStreamListener(backend, zcodeSid);
   const monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
 
+  // Per-session ProjectionDiffer (persists across turns). The baseline mark_seen
+  // prevents the differ from re-emitting history at turn completion.
+  const differ = getOrCreateDiffer(server, zcodeSid);
+  const baselineMsgs = await fetchMessages(server, zcodeSid);
+  differ.markSeen(baselineMsgs);
+
   // Subscribe BEFORE send so we don't lose early turn.completed on short turns.
   const snapshot = await listener.subscribe(() => server.nextId());
   if (snapshot === null) {
@@ -249,6 +255,7 @@ export async function prompt(
       server,
       listener,
       monitor,
+      differ,
       cx,
       params.sessionId,
       chunkMsgId,
@@ -311,6 +318,18 @@ async function fetchMessages(server: ZcodeAcpServer, zcodeSid: string): Promise<
   return result.messages ?? [];
 }
 
+/** Get or create the session-level ProjectionDiffer (persists across turns). */
+function getOrCreateDiffer(server: ZcodeAcpServer, zcodeSid: string): ProjectionDiffer {
+  let d = server.differs.get(zcodeSid);
+  if (!d) {
+    d = new ProjectionDiffer();
+    server.differs.set(zcodeSid, d);
+  }
+  const differ = d as ProjectionDiffer;
+  differ.resetTurn();
+  return differ;
+}
+
 /**
  * Event-driven turn loop: translate zcode events via EventTranslator and
  * dispatch each internal event to the ACP client. No-progress timeout is 120s
@@ -324,6 +343,7 @@ async function runEventTurn(
   server: ZcodeAcpServer,
   listener: EventStreamListener,
   monitor: TurnMonitor,
+  differ: ProjectionDiffer,
   cx: acp.AgentContext,
   acpSid: string,
   chunkMsgId: string,
@@ -331,6 +351,7 @@ async function runEventTurn(
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
   const translator = new EventTranslator();
+  differ.resetTurn();
   const NO_PROGRESS_MS = 120_000;
   let lastProgress = Date.now();
   let lastStallCheck = Date.now();
@@ -384,6 +405,14 @@ async function runEventTurn(
       if (iev.kind === "TextDelta") emittedText = true;
       if (iev.kind === "ToolCallNew" || iev.kind === "ToolCallUpdate") emittedOutput = true;
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
+    }
+
+    // Sync translator → differ seen-tool-ids so the turn-completion differ.diff
+    // doesn't re-emit tools the event path already sent (which would clear
+    // Bash terminal output via a content-less ToolCallNew through the terminal
+    // path). Without this, Bash output is wiped on the next turn.
+    for (const seenId of translator.seenToolIds) {
+      differ.markToolSeen(seenId);
     }
 
     if (translator.turnDone) {

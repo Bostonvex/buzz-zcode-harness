@@ -127,39 +127,55 @@ function dispatchToolCallUpdate(
 }
 
 /**
- * Bash terminal update (interim): emit the data + status in the standard
- * single update. Commit 5 replaces this with the 2-notification split.
+ * Bash terminal update — the 2-notification split (matches acp-agent.ts:5061-5094
+ * and the Python bridge's _dispatch_event). Zed correlates by terminal_id, so
+ * the two notifications MUST be separate:
+ *   ① terminal_output — pure data, no status/content. Sent on BOTH progress and
+ *      result states (whenever there's data) so live output streams.
+ *   ② terminal_exit — terminal state only: status + content[type:terminal] +
+ *      _meta.terminal_exit (with exitCode) + rawOutput text fallback. Sent ONLY
+ *      on completed/failed.
+ *
+ * Merging them into one notification causes Zed to clear the content once the
+ * turn completes (the original bug); splitting keeps the output visible.
  */
-function dispatchTerminalUpdate(
+async function dispatchTerminalUpdate(
   _server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   ev: Extract<InternalEvent, { kind: "ToolCallUpdate" }>,
   toolName: string,
 ): Promise<void> {
+  // ① terminal_output (pure data) — progress and result both emit it.
   let termData: unknown = ev.rawOutput ?? ev.rawResult;
   if (termData && typeof termData === "object" && !Array.isArray(termData)) {
     termData = (termData as Record<string, unknown>)["content"] ?? "";
   }
-  const update: acp.SessionUpdate = {
-    sessionUpdate: "tool_call_update",
-    toolCallId: ev.callId,
-    status: ev.status,
-  };
-  const meta: Record<string, unknown> = { claudeCode: { toolName } };
-  if (ev.status === "completed" || ev.status === "failed") {
-    meta["terminal_exit"] = {
-      terminal_id: ev.callId,
-      exit_code: extractExitCode(ev.rawResult, ev.status === "failed"),
-      signal: null,
-    };
-    update.content = [{ type: "terminal", terminalId: ev.callId }];
-  } else if (termData) {
-    meta["terminal_output"] = { terminal_id: ev.callId, data: String(termData) };
+  if (termData) {
+    await sendSessionUpdate(cx, acpSid, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: ev.callId,
+      _meta: { terminal_output: { terminal_id: ev.callId, data: String(termData) } },
+    });
   }
-  if (ev.output !== undefined) update.rawOutput = ev.output;
-  update._meta = meta;
-  return sendSessionUpdate(cx, acpSid, update);
+
+  // ② terminal_exit (terminal state) — only on completed/failed.
+  if (ev.status === "completed" || ev.status === "failed") {
+    const exitCode = extractExitCode(ev.rawResult, ev.status === "failed");
+    const exitUpdate: acp.SessionUpdate = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: ev.callId,
+      status: ev.status,
+      content: [{ type: "terminal", terminalId: ev.callId }],
+      _meta: {
+        claudeCode: { toolName },
+        terminal_exit: { terminal_id: ev.callId, exit_code: exitCode, signal: null },
+      },
+    };
+    // rawOutput gives Zed a text fallback outside the terminal render path.
+    if (ev.output !== undefined) exitUpdate.rawOutput = ev.output;
+    await sendSessionUpdate(cx, acpSid, exitUpdate);
+  }
 }
 
 async function dispatchUsageDelta(

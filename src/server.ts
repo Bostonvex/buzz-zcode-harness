@@ -45,7 +45,7 @@ export class ZcodeAcpServer {
   clientCapabilities: ClientCapabilities = {};
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
-  /** Per-session ProjectionDiffers ( Commit 4). */
+  /** Per-session ProjectionDiffers (persists across turns). */
   readonly differs = new Map<string, unknown>();
   /** Per-session model cache (Commit 7). */
   readonly modelCache = new Map<string, string>();

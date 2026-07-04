@@ -1,0 +1,198 @@
+/**
+ * dispatch.ts tests — verify the ACP session/update notifications emitted for
+ * each InternalEvent kind. Uses a mock AgentContext that records every notify
+ * call so we can assert on the exact JSON shape.
+ *
+ * Focus areas: the Bash terminal 2-notification split (terminal_output +
+ * terminal_exit), the non-terminal generic path, and tool_call _meta.
+ */
+
+import type * as acp from "@agentclientprotocol/sdk";
+import { describe, expect, it } from "vitest";
+
+import { dispatchEvent } from "../src/handlers/dispatch.js";
+import { ZcodeAcpServer } from "../src/server.js";
+import type { InternalEvent } from "../src/translators/types.js";
+
+/** Mock AgentContext that records every notify call. */
+function mockContext(): { cx: acp.AgentContext; sent: acp.SessionUpdate[] } {
+  const sent: acp.SessionUpdate[] = [];
+  const cx = {
+    notify(method: string, params: { sessionId: string; update: acp.SessionUpdate }) {
+      expect(method).toBe("session/update");
+      sent.push(params.update);
+      return Promise.resolve();
+    },
+  } as unknown as acp.AgentContext;
+  return { cx, sent };
+}
+
+/** Build a server with terminal_output capability toggled. */
+function makeServer(terminalOutput: boolean): ZcodeAcpServer {
+  const s = new ZcodeAcpServer();
+  s.clientCapabilities = { _meta: { terminal_output: terminalOutput } };
+  return s;
+}
+
+const SID = "sess_test";
+const CHUNK = "chunk-1";
+
+describe("dispatchEvent", () => {
+  it("ToolCallNew emits tool_call with claudeCode toolName _meta", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(false);
+    const ev: InternalEvent = {
+      kind: "ToolCallNew",
+      callId: "c1",
+      tool: "Read",
+      acpKind: "read",
+      status: "pending",
+      title: "Read: foo.py",
+      input: { file_path: "foo.py" },
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "tool_call",
+      toolCallId: "c1",
+      title: "Read: foo.py",
+      kind: "read",
+      _meta: { claudeCode: { toolName: "Read" } },
+    });
+  });
+
+  it("Bash ToolCallNew with terminal_output support adds terminal_info + content", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const ev: InternalEvent = {
+      kind: "ToolCallNew",
+      callId: "c1",
+      tool: "Bash",
+      acpKind: "execute",
+      status: "pending",
+      title: "Bash: ls",
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(sent[0]).toMatchObject({
+      _meta: { claudeCode: { toolName: "Bash" }, terminal_info: { terminal_id: "c1" } },
+      content: [{ type: "terminal", terminalId: "c1" }],
+    });
+  });
+
+  it("Bash progress splits into terminal_output only (no status)", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const ev: InternalEvent = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+      status: "in_progress",
+      rawOutput: "running...",
+      output: "running...",
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c1",
+      _meta: { terminal_output: { terminal_id: "c1", data: "running..." } },
+    });
+    // No status field on the data-only notification.
+    expect((sent[0] as { status?: string }).status).toBeUndefined();
+  });
+
+  it("Bash completed emits 2 notifications: terminal_output + terminal_exit", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const ev: InternalEvent = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+      status: "completed",
+      rawOutput: "done",
+      output: "done",
+      rawResult: { success: true, content: "done", perf: { exitCode: 0 } },
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(sent).toHaveLength(2);
+    // ① terminal_output (pure data)
+    expect(sent[0]).toMatchObject({
+      _meta: { terminal_output: { terminal_id: "c1", data: "done" } },
+    });
+    // ② terminal_exit (terminal state)
+    expect(sent[1]).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c1",
+      status: "completed",
+      content: [{ type: "terminal", terminalId: "c1" }],
+      _meta: {
+        claudeCode: { toolName: "Bash" },
+        terminal_exit: { terminal_id: "c1", exit_code: 0, signal: null },
+      },
+      rawOutput: "done",
+    });
+  });
+
+  it("Bash failed extracts exit code 1 when no perf.exitCode", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const ev: InternalEvent = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+      status: "failed",
+      rawResult: { success: false, content: "boom" },
+      output: "boom",
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    const exitNotif = sent[1] as unknown as { _meta: { terminal_exit: { exit_code: number } } };
+    expect(exitNotif._meta.terminal_exit.exit_code).toBe(1);
+  });
+
+  it("non-Bash ToolCallUpdate emits single update with status + content", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(true); // terminal supported but tool is Read, not Bash
+    const ev: InternalEvent = {
+      kind: "ToolCallUpdate",
+      callId: "c2",
+      tool: "Read",
+      status: "completed",
+      output: "file body",
+      content: [{ type: "content", content: { type: "text", text: "file body" } }],
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "c2",
+      status: "completed",
+      _meta: { claudeCode: { toolName: "Read" } },
+      rawOutput: "file body",
+    });
+  });
+
+  it("TextDelta emits agent_message_chunk with chunk messageId", async () => {
+    const { cx, sent } = mockContext();
+    await dispatchEvent(makeServer(false), cx, SID, { kind: "TextDelta", text: "hi" }, CHUNK);
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "hi" },
+      messageId: CHUNK,
+    });
+  });
+
+  it("PlanUpdate emits plan sessionUpdate with entries", async () => {
+    const { cx, sent } = mockContext();
+    await dispatchEvent(
+      makeServer(false),
+      cx,
+      SID,
+      { kind: "PlanUpdate", entries: [{ content: "do X", status: "pending", priority: "high" }] },
+      CHUNK,
+    );
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "plan",
+      entries: [{ content: "do X", status: "pending", priority: "high" }],
+    });
+  });
+});
