@@ -258,6 +258,12 @@ export async function prompt(
   const text = extractPromptText(params.prompt);
   if (!text) throw new Error("empty prompt");
 
+  // Slash-command interception: dispatches directly to ZCode methods and
+  // returns end_turn without entering the turn loop. Unknown /x falls through.
+  const { handleSlashCommand } = await import("./slash.js");
+  const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
+  if (intercepted) return intercepted;
+
   // Register the pending turn. This same object is mutated by cancel(); the
   // turn loop checks `.cancelled` on the SAME reference, so cancel propagates.
   const turn: PendingTurn = {

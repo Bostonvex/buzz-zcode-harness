@@ -1,0 +1,110 @@
+/**
+ * Slash-command interception inside `session/prompt`.
+ *
+ * When the prompt text starts with `/`, dispatch the matching ZCode method
+ * directly (compact/goal/fork/rewind/steer/model/mode/thought), emit a short
+ * feedback `agent_message_chunk`, and return `end_turn` — never reaching the
+ * normal turn loop. Unknown `/x` falls through to the model (extensibility).
+ *
+ * Returns the PromptResponse when intercepted, or null to let the caller run a
+ * normal turn.
+ */
+
+import { randomUUID } from "node:crypto";
+import type * as acp from "@agentclientprotocol/sdk";
+
+import { RequestError } from "@agentclientprotocol/sdk";
+import { applyModelSwitch } from "../config/runtime-model.js";
+import { CONFIG_DISPATCH } from "../utils.js";
+import { log } from "../utils.js";
+import type { ZcodeAcpServer } from "../server.js";
+import { sendTextChunk } from "./io.js";
+import { compact, fork, rewind, steer } from "./extensions.js";
+
+/** Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise. */
+export async function handleSlashCommand(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+  text: string,
+): Promise<acp.PromptResponse | null> {
+  const stripped = text.trim();
+  if (!stripped.startsWith("/")) return null;
+
+  const parts = stripped.slice(1).split(/\s(.*)/s);
+  const cmd = (parts[0] ?? "").toLowerCase();
+  const arg = (parts[1] ?? "").trim();
+  const chunkMsgId = randomUUID();
+
+  const feedback = async (msg: string): Promise<void> => {
+    await sendTextChunk(cx, acpSid, msg, chunkMsgId);
+  };
+
+  const ok = async (msg: string): Promise<acp.PromptResponse> => {
+    await feedback(msg);
+    return { stopReason: "end_turn" };
+  };
+
+  try {
+    switch (cmd) {
+      case "compact": {
+        await compact(server, { sessionId: acpSid }, cx);
+        return ok("✓ compacted conversation context");
+      }
+      case "goal": {
+        if (!arg) throw new RequestError(-32602, "/goal requires a goal description");
+        await server
+          .ensureBackend()
+          .request(
+            server.nextId(),
+            "session/goal",
+            { sessionId: zcodeSid, action: "set", objective: arg },
+            30000,
+          );
+        return ok(`✓ goal set: ${arg}`);
+      }
+      case "fork": {
+        const result = (await fork(server, { sessionId: acpSid })) as { sessionId?: string };
+        return ok(`✓ forked new session: ${result.sessionId ?? "?"}`);
+      }
+      case "rewind": {
+        await rewind(server, { sessionId: acpSid });
+        return ok("✓ rewound workspace to checkpoint");
+      }
+      case "steer": {
+        if (!arg) throw new RequestError(-32602, "/steer requires content");
+        await steer(server, { sessionId: acpSid, content: arg });
+        return ok("✓ appended instruction to the running turn");
+      }
+      case "model": {
+        if (!arg) throw new RequestError(-32602, "/model requires a model id");
+        const switchOk = await applyModelSwitch(server, zcodeSid, arg);
+        if (!switchOk) throw new RequestError(-32603, `model switch failed for ${arg}`);
+        return ok(`✓ model = ${arg}`);
+      }
+      case "mode":
+      case "thought": {
+        if (!arg) throw new RequestError(-32602, `/${cmd} requires an argument`);
+        const dispatch = CONFIG_DISPATCH[cmd];
+        if (!dispatch) throw new RequestError(-32602, `unknown /${cmd}`);
+        const resp = await server
+          .ensureBackend()
+          .request(
+            server.nextId(),
+            dispatch.method,
+            { sessionId: zcodeSid, [dispatch.paramKey]: arg },
+            15000,
+          );
+        if (resp.error) throw new RequestError(-32603, `${cmd} failed: ${resp.error.message}`);
+        return ok(`✓ ${cmd} = ${arg}`);
+      }
+      default:
+        // Unknown /x → don't intercept, send to the model as normal text.
+        return null;
+    }
+  } catch (e) {
+    log(`  /${cmd} failed: ${e instanceof Error ? e.message : String(e)}`);
+    throw e;
+  }
+}
