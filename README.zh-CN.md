@@ -1,6 +1,6 @@
 # zcode-acp-server
 
-[![CI](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml)
+[![CI](https://github.com/william0wang/zcode-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/william0wang/zcode-acp/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **[English](README.md)** | 简体中文
@@ -86,6 +86,33 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_BASE_URL`  | _（来自 config） | 覆盖 provider 的 base URL                                                                                                                                                                             |
 | `ZCODE_ACP_DEBUG` | _（未设置）      | 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
 
+## 独立配额查询 CLI（zcode-quota）
+
+除了 ACP server，本包还附带一个 `zcode-quota` 命令，可在**终端**里直接查询
+GLM Coding Plan 用量——无需编辑器，也无需 server 运行。它读取同一个
+`~/.zcode/v2/config.json` 获取凭证。
+
+```bash
+# 一次性：打印卡片后退出
+zcode-quota
+
+# 常驻监控：清屏并每 30s 刷新（默认）
+zcode-quota -w
+
+# 自定义刷新间隔（秒，最小 10）
+zcode-quota --watch --interval 60
+```
+
+watch 模式会原地清屏重绘卡片，效果类似 `top`/`htop`。按 `Ctrl-C` 退出。
+之所以设最小间隔 10s，是因为配额 API 内部有 10s 缓存——更短的间隔只会一直
+返回过期的缓存值，没有意义。
+
+未全局安装时，可直接运行构建产物：
+
+```bash
+node dist/bin/quota.js -w
+```
+
 ## ACP Registry
 
 本服务端兼容 [ACP Registry](https://agentclientprotocol.com/get-started/registry)。它在 `initialize` 时声明一个 `agent` 类型的认证方法——GLM API key 由 ZCode 后端从 `~/.zcode/v2/config.json` 读取，**编辑器侧无需配置任何凭据**。
@@ -153,6 +180,21 @@ commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELO
 - [Agent Client Protocol](https://agentclientprotocol.com/)（Apache 2.0）—— ACP 协议规范
 - [ZCode](https://zcode.z.ai) / [智谱 Z.AI](https://z.ai) —— GLM 模型与 ZCode CLI
 - [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) —— 参考实现，本项目的设计借鉴了它的桥接架构
+
+## 隐私
+
+**无遥测、无追踪** —— 本服务端不向任何方上报任何信息。除 ACP SDK 外唯一运行时依赖是
+`zod`。
+
+你的提示词、代码、文件内容通过**本地管道**在编辑器与 ZCode 后端之间中转；这些数据会到达
+GLM 云端 API，仅因 ZCode 后端本身为推理而发送——本服务端不增加任何额外去向。
+
+| 方面 | 做什么 & 为什么 |
+| ---- | --------------- |
+| 网络 | 全代码库仅一处对外请求：配额 GET（`open.bigmodel.cn` / `api.z.ai`），只带 API key —— 为查询用量数字，不发送用户内容 |
+| 凭据 | API key 从 `~/.zcode/v2/config.json` 读取，用于认证 ZCode 子进程和配额请求。从不记录日志、从不写入别处。OAuth 完全由 ZCode 子进程处理 |
+| 磁盘 | 不创建任何新文件。只写入已存在的 `~/.zcode/v2/tasks-index.sqlite` —— 这是**将会话同步到 ZCode App**，使其出现在历史列表和全文搜索中（存会话标题和首条提示词） |
+| 日志 | 诊断信息输出到 stderr，用于排查桥接问题。即使开启 `ZCODE_ACP_DEBUG=1`，也绝不记录提示词/代码/密钥 |
 
 ## 许可证
 

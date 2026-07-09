@@ -1,6 +1,6 @@
 # zcode-acp-server
 
-[![CI](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml)
+[![CI](https://github.com/william0wang/zcode-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/william0wang/zcode-acp/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 English | **[简体中文](README.zh-CN.md)**
@@ -87,6 +87,34 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 | `ZCODE_BASE_URL`  | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                               |
 | `ZCODE_ACP_DEBUG` | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
 
+## Standalone Quota CLI
+
+Besides the ACP server, the package ships a `zcode-quota` bin that queries
+your GLM Coding Plan usage **from the terminal** — no editor or running server
+needed. It reads the same `~/.zcode/v2/config.json` for credentials.
+
+```bash
+# One-shot: print the card and exit
+zcode-quota
+
+# Live monitor: clear the screen and refresh every 30s (default)
+zcode-quota -w
+
+# Refresh at a custom interval (seconds; minimum 10)
+zcode-quota --watch --interval 60
+```
+
+The watch mode clears and redraws the card in place, like `top`/`htop`. Press
+`Ctrl-C` to exit. The 10s minimum exists because the quota API is cached for
+10s internally — a shorter interval would just keep returning the stale cached
+value.
+
+When the package isn't globally installed, run the built file directly:
+
+```bash
+node dist/bin/quota.js -w
+```
+
 ## ACP Registry
 
 This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — the GLM API key is read from `~/.zcode/v2/config.json` by the ZCode backend, so **no editor-side credentials are required**.
@@ -156,6 +184,23 @@ recorded in [CHANGELOG.md](CHANGELOG.md).
 - [Agent Client Protocol](https://agentclientprotocol.com/) (Apache-2.0) — the ACP specification
 - [ZCode](https://zcode.z.ai) / [Zhipu Z.AI](https://z.ai) — the GLM model and ZCode CLI
 - [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) — reference implementation that informed this server's design
+
+## Privacy
+
+**No telemetry or tracking** — the server reports nothing to anyone. The only
+runtime dependency beyond the ACP SDK is `zod`.
+
+Your prompts, code, and file contents are relayed between the editor and the
+ZCode backend over **local pipes**; that data reaches the GLM cloud API only
+because the ZCode backend itself sends it there for inference — this server
+adds no extra destinations.
+
+| Concern | What & why |
+| ------- | ---------- |
+| Network | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content |
+| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess |
+| Disk | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
+| Logging | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged |
 
 ## License
 
