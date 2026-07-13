@@ -37,8 +37,32 @@ import {
   updateRuntimeModelConfig,
 } from "./handlers/extensions.js";
 import { sendAvailableCommandsDeferred } from "./handlers/io.js";
+import { loadPluginCommands } from "./config/plugin-commands.js";
+import { loadSkillCommands } from "./config/skill-discovery.js";
 import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
+
+/**
+ * Build the full slash-command list: static bridge commands + dynamic plugin
+ * commands + discovered skills. Called once at startup (nothing changes
+ * mid-session). Deduplicates by name — static commands take priority, then
+ * plugins, then skills.
+ */
+function buildAllCommands() {
+  const pluginCommands = loadPluginCommands();
+  const skillCommands = loadSkillCommands();
+  const seen = new Set<string>(SLASH_COMMANDS.map((c) => c.name));
+  const merged: Array<{ name: string; description: string; input?: { hint: string } }> = [
+    ...SLASH_COMMANDS,
+  ];
+  for (const c of [...pluginCommands, ...skillCommands]) {
+    if (!seen.has(c.name)) {
+      seen.add(c.name);
+      merged.push(c);
+    }
+  }
+  return merged;
+}
 
 async function main(): Promise<void> {
   // stdout is the outbound channel to the client; stdin is inbound.
@@ -47,6 +71,9 @@ async function main(): Promise<void> {
 
   const stream = acp.ndJsonStream(outbound, inbound);
   const server = new ZcodeAcpServer();
+
+  // Load all commands once at startup (they don't change mid-session).
+  const allCommands = buildAllCommands();
 
   /** Passthrough params parser for the ZCode-specific extension methods. */
   const extParams = z.object({ sessionId: z.string() }).passthrough();
@@ -81,18 +108,18 @@ async function main(): Promise<void> {
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
     .onRequest("session/new", async (ctx) => {
       const result = await newSession(server, ctx.params);
-      sendAvailableCommandsDeferred(ctx.client, result.sessionId, SLASH_COMMANDS);
+      sendAvailableCommandsDeferred(ctx.client, result.sessionId, allCommands);
       return result;
     })
     .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
     .onRequest("session/resume", async (ctx) => {
       const result = await resumeSession(server, ctx.params, ctx.client);
-      sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, SLASH_COMMANDS);
+      sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, allCommands);
       return result;
     })
     .onRequest("session/load", async (ctx) => {
       const result = await loadSession(server, ctx.params, ctx.client);
-      sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, SLASH_COMMANDS);
+      sendAvailableCommandsDeferred(ctx.client, ctx.params.sessionId, allCommands);
       return result;
     })
     .onRequest("session/prompt", (ctx) =>

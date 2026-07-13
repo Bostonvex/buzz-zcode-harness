@@ -28,6 +28,15 @@ export const ZCODE_CREDS_PATH = path.join(
 /**
  * Slash commands surfaced to the editor. Each maps to a ZCode session method
  * that the server forwards when the user types the command.
+ *
+ * Commands handled by the bridge (compact/goal/fork/rewind/steer/model/mode/
+ * thought/quota/mcp) are intercepted in `handleSlashCommand`. Commands handled
+ * by the ZCode backend (init) and plugin commands (code-review etc.) pass
+ * through to `session/send` — the backend resolves them before the model.
+ *
+ * Discovered Skills (arco-design, tdd, etc.) are also appended to the command
+ * list at startup via `buildAllCommands()` — they pass through as normal text
+ * and the model resolves them via its `Skill` tool.
  */
 export const SLASH_COMMANDS = [
   { name: "compact", description: "Compress conversation context (free up tokens)" },
@@ -59,6 +68,8 @@ export const SLASH_COMMANDS = [
     input: { hint: "max|high|nothink" },
   },
   { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
+  { name: "mcp", description: "List available MCP servers" },
+  { name: "init", description: "Create or update workspace AGENTS.md instructions" },
 ] as const;
 
 /** Static metadata for the configOptions selects (model/mode/thought). */
@@ -123,4 +134,32 @@ export function log(msg: string): void {
 /** Warning — always emitted. For perceivable failures. */
 export function warn(msg: string): void {
   process.stderr.write(`[zcode-acp] ${msg}\n`);
+}
+
+/**
+ * Compare two semver-like version strings numerically (e.g. "10.0.0" > "2.0.0").
+ * Falls back to lexicographic comparison for non-numeric segments. Used by
+ * plugin/skill/MCP discovery to find the latest cached version directory.
+ *
+ * Returns positive if a > b, negative if a < b, 0 if equal.
+ */
+export function compareVersions(a: string, b: string): number {
+  // Empty string sorts before any version (so the first candidate always wins
+  // against the initial "" sentinel used by discovery loops).
+  if (!a && !b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  const pa = a.split(".");
+  const pb = b.split(".");
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const na = Number(pa[i] ?? "0");
+    const nb = Number(pb[i] ?? "0");
+    if (Number.isNaN(na) || Number.isNaN(nb)) {
+      // Non-numeric segment — fall back to lexicographic.
+      return (pa[i] ?? "").localeCompare(pb[i] ?? "");
+    }
+    if (na !== nb) return na - nb;
+  }
+  return 0;
 }
