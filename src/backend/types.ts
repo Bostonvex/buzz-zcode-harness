@@ -67,7 +67,13 @@ export type ZcodeEventType =
   | "tool.updated"
   | "turn.completed"
   | "turn.failed"
-  | "session.updated";
+  | "session.updated"
+  // app-server 0.15.2+: steer lifecycle + terminal turn. Not yet translated by
+  // the bridge; tracked in docs/BACKLOG.md. Listed here so unknown-type guards
+  // stay accurate.
+  | "turn.steerQueued"
+  | "turn.steerDrained"
+  | "turn.terminal";
 
 export interface ZcodeEvent {
   sessionId: string;

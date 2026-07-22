@@ -408,6 +408,53 @@ Session state update (usage, etc.).
 }
 ```
 
+### Steer lifecycle events
+
+When `session/steer` appends instructions to a running turn, the backend emits
+a pair of lifecycle events (available in app-server 0.15.2+). The bridge does
+not currently translate these — they are tracked as a future enhancement (see
+[`BACKLOG.md`](./BACKLOG.md)).
+
+```json
+{
+  "type": "turn.steerQueued",
+  "payload": {}
+}
+```
+
+```json
+{
+  "type": "turn.steerDrained",
+  "payload": {}
+}
+```
+
+### `turn.terminal`
+
+Terminal turn lifecycle event (app-server 0.15.2+). Carries a status plus
+usage. The bridge currently relies on `turn.completed`/`turn.failed` instead;
+documented here for completeness.
+
+```json
+{
+  "method": "session/event",
+  "params": {
+    "sessionId": "sess_abc123",
+    "seq": 49,
+    "type": "turn.terminal",
+    "payload": {
+      "kind": "turn.terminal",
+      "status": "success",
+      "resultType": "end_turn",
+      "durationMs": 12345,
+      "inputTokens": 1234,
+      "outputTokens": 567,
+      "totalTokens": 1801
+    }
+  }
+}
+```
+
 ## Interaction Protocol (Server -> Client)
 
 Requests that zcode actively sends to the bridge.
@@ -802,3 +849,10 @@ tool card as `failed` with `_meta.backgroundTask.cancelled = true`.
 | >= 0.15.0 | Supported | All supported | Full functionality |
 | >= 0.14.8 | Supported | Partially supported | workspace/* unavailable |
 | 0.14.5 ~ 0.14.7 | Not supported | Not supported | Incompatible with this project |
+
+## Additional backend methods (not wired into the bridge)
+
+The backend exposes more RPC methods than the bridge uses (sub-agent listing,
+event pull, session usage/close, automation, workspace config, MCP/plugins).
+These have no ACP-side counterpart yet. See [`BACKLOG.md`](./BACKLOG.md) for
+the full list and which are candidates for future support.
