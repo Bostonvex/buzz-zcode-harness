@@ -1,0 +1,184 @@
+/**
+ * Tests for multi-provider model discovery and runtimeModel construction.
+ *
+ * History: loadProviderModels() hardcoded a single builtin provider id, so
+ * custom providers configured in the ZCode desktop app never appeared in the
+ * dropdown. These tests lock the new behaviour: loadAllModels() aggregates ALL
+ * enabled providers, buildRuntimeModel() NEVER carries apiKey (the backend's
+ * runtimeModel schema rejects it), builtin models encode as bare modelIds, and
+ * third-party models carry their providerId prefix.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+
+import { ZCODE_CREDS_PATH } from "../src/utils.js";
+
+/** Fake config.json with one builtin (OAuth, no apiKey) + one custom (apiKey). */
+const FAKE_CONFIG = {
+  provider: {
+    "builtin:primary": {
+      name: "Primary",
+      kind: "anthropic",
+      enabled: true,
+      options: { baseURL: "https://example.test/api" },
+      models: {
+        "model-a": { limit: { context: 1000000 } },
+        "model-b": { limit: { context: 200000 } },
+      },
+    },
+    "builtin:secondary": {
+      name: "Secondary",
+      kind: "anthropic",
+      enabled: false,
+      options: { baseURL: "https://example.test/api2" },
+      models: { "model-a": { limit: { context: 1000000 } } },
+    },
+    "custom-provider-alpha": {
+      name: "Alpha",
+      kind: "openai-compatible",
+      enabled: true,
+      source: "custom",
+      options: {
+        apiKey: "test-key-alpha",
+        baseURL: "http://127.0.0.1:8000/v1",
+      },
+      models: {
+        "alpha-1": { limit: { context: 200000 } },
+      },
+    },
+    "custom-provider-beta": {
+      name: "Beta",
+      kind: "anthropic",
+      source: "custom",
+      options: { apiKey: "test-key-beta", baseURL: "https://example.test/api" },
+      models: { "beta-1": { limit: { context: 200000 } } },
+    },
+  },
+};
+
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return {
+    ...actual,
+    readFileSync: (p: string) => {
+      if (p === ZCODE_CREDS_PATH) return JSON.stringify(FAKE_CONFIG);
+      return actual.readFileSync(p);
+    },
+  };
+});
+
+// Import AFTER vi.mock is set up.
+const { loadAllModels, modelContextWindow, parseModelValue, formatModelValue, buildRuntimeModel } =
+  await import("../src/config/options.js").then(async () => {
+    const opts = await import("../src/config/options.js");
+    const rm = await import("../src/config/runtime-model.js");
+    return { ...opts, buildRuntimeModel: rm.buildRuntimeModel };
+  });
+
+describe("loadAllModels", () => {
+  it("only collects models from enabled providers", () => {
+    const models = loadAllModels();
+    const ids = models.map((m) => m.modelId);
+    // Enabled builtin + enabled custom. The disabled Secondary and the
+    // custom-without-enabled (Beta) must NOT appear.
+    expect(ids).toContain("model-a");
+    expect(ids).toContain("model-b");
+    expect(ids).toContain("alpha-1");
+    // beta-1 is in a provider WITHOUT an enabled flag → excluded.
+    expect(ids).not.toContain("beta-1");
+  });
+
+  it("carries the provider name for display", () => {
+    const models = loadAllModels();
+    const alpha = models.find((m) => m.modelId === "alpha-1");
+    expect(alpha?.providerName).toBe("Alpha");
+    expect(alpha?.providerId).toBe("custom-provider-alpha");
+  });
+});
+
+describe("modelContextWindow", () => {
+  it("looks up context by provider+model (not hardcoded provider)", () => {
+    expect(modelContextWindow("builtin:primary", "model-a")).toBe(1000000);
+    expect(modelContextWindow("custom-provider-alpha", "alpha-1")).toBe(200000);
+  });
+
+  it("returns 0 for an unknown provider/model", () => {
+    expect(modelContextWindow("unknown", "nope")).toBe(0);
+  });
+});
+
+describe("parseModelValue / formatModelValue", () => {
+  it("builtin providers encode as bare modelId (no prefix)", () => {
+    // The common case stays clean — builtin models show just the modelId.
+    const value = formatModelValue("builtin:primary", "model-a");
+    expect(value).toBe("model-a");
+    expect(parseModelValue(value)).toEqual({
+      providerId: "builtin:primary",
+      modelId: "model-a",
+    });
+  });
+
+  it("third-party providers round-trip providerId + modelId", () => {
+    const value = formatModelValue("custom-provider-alpha", "alpha-1");
+    expect(value).toBe("custom-provider-alpha\\alpha-1");
+    expect(parseModelValue(value)).toEqual({
+      providerId: "custom-provider-alpha",
+      modelId: "alpha-1",
+    });
+  });
+
+  it("a plain modelId (no backslash) resolves to the first enabled builtin provider", () => {
+    const parsed = parseModelValue("model-a");
+    expect(parsed.modelId).toBe("model-a");
+    expect(parsed.providerId).toBe("builtin:primary");
+  });
+
+  it("splits on the FIRST backslash only (modelId may contain none)", () => {
+    const parsed = parseModelValue("pid\\model-a");
+    expect(parsed).toEqual({ providerId: "pid", modelId: "model-a" });
+  });
+});
+
+describe("buildRuntimeModel", () => {
+  it("NEVER carries apiKey — the backend schema rejects it and resolves auth itself", () => {
+    // Even for a custom provider WITH an apiKey in config (custom-provider-alpha),
+    // the overlay must omit it: the backend's runtimeModel schema types apiKey as
+    // a discriminated-union object, and a bare string → "Invalid params".
+    const rm = buildRuntimeModel({
+      providerId: "custom-provider-alpha",
+      providerName: "Alpha",
+      modelId: "alpha-1",
+    }) as { provider: { apiKey?: string; baseURL?: string; kind?: string } };
+
+    expect(rm.provider.apiKey).toBeUndefined();
+    expect(rm.provider.baseURL).toBe("http://127.0.0.1:8000/v1");
+    expect(rm.provider.kind).toBe("openai-compatible");
+  });
+
+  it("omits apiKey for builtin OAuth providers (no apiKey in config)", () => {
+    const rm = buildRuntimeModel({
+      providerId: "builtin:primary",
+      providerName: "Primary",
+      modelId: "model-a",
+    }) as { provider: { apiKey?: string } };
+
+    expect(rm.provider.apiKey).toBeUndefined();
+  });
+
+  it("returns null for an unknown provider", () => {
+    expect(
+      buildRuntimeModel({ providerId: "nope", providerName: "nope", modelId: "x" }),
+    ).toBeNull();
+  });
+
+  it("includes all the provider's models in the overlay", () => {
+    const rm = buildRuntimeModel({
+      providerId: "builtin:primary",
+      providerName: "Primary",
+      modelId: "model-a",
+    }) as { provider: { models: Array<{ modelId: string }> } };
+
+    const modelIds = rm.provider.models.map((m) => m.modelId);
+    expect(modelIds).toEqual(["model-a", "model-b"]);
+  });
+});

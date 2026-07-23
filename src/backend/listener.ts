@@ -12,7 +12,14 @@
  */
 
 import type { ZcodeBackend } from "./client.js";
-import type { ZcodeEvent, ZcodeProjection, ZcodeSnapshot, ZcodeSubscribeResult } from "./types.js";
+import type {
+  ZcodeEvent,
+  ZcodeProjection,
+  ZcodeResponse,
+  ZcodeSnapshot,
+  ZcodeSubscribeResult,
+} from "./types.js";
+import { log, warn } from "../utils.js";
 
 /** ID generator function (the server's `_next_id`). */
 export type NextId = () => number;
@@ -42,29 +49,65 @@ export class EventStreamListener {
   /**
    * Subscribe and capture the initial snapshot + eventSeq watermark.
    *
-   * Returns the snapshot (with projection/messages) or null on failure. ZCode
-   * CLI 0.14.8+ always supports this; null means an old/ broken backend and
-   * the caller should surface an error (polling fallback was removed).
+   * Returns the snapshot (with projection/messages). Throws on failure,
+   * surfacing the backend's real error message (reader dead, timeout, pipe
+   * broken, method not found on old CLI, or a session-level business error) so
+   * the caller can distinguish root causes instead of seeing a single
+   * misleading "version too old" string.
    */
-  async subscribe(nextId: NextId): Promise<ZcodeSnapshot | null> {
-    const resp = await this.backend.request(
-      nextId(),
-      "session/subscribe",
-      {
-        sessionId: this.sid,
-        deliveryKind: "desktop-continuous",
-        includeSnapshot: true,
-        afterSeq: 0,
-      },
-      10000,
-    );
-    if (resp.error) {
-      return null;
+  async subscribe(nextId: NextId): Promise<ZcodeSnapshot> {
+    // Retry transient timeouts: after a preempt (`session/stop`) the backend's
+    // main loop can be briefly busy finalising the cancelled turn (interrupting
+    // the model stream, persisting checkpoints). A subscribe issued in that
+    // window may not get a response within the per-attempt deadline. The backend
+    // recovers on its own ("wait a bit and resend works"), so a couple of
+    // retries absorb the intermittent stall instead of surfacing it to the user.
+    //
+    // Only `timeout` is retried — non-transient errors (reader dead, pipe
+    // broken, method-not-found, session-level business error) fail fast.
+    // Each attempt uses a fresh id from `nextId()` (monotonic, never reused), so
+    // a late response to an earlier timed-out request is safely discarded by
+    // `resolvePending` (no pending entry → dropped).
+    //
+    // includeSnapshot is FALSE here on purpose. The caller (prompt()) discards
+    // the returned snapshot anyway (`void snapshot`) — the projection baseline
+    // comes from a separate fetchMessages() call. Asking the backend for a
+    // snapshot here only makes it compute a full session snapshot (which grows
+    // O(messages) and can take seconds-to-tens-of-seconds on long sessions:
+    // observed 3.8s at 267 messages, 38s at 3500 messages) and is the primary
+    // cause of subscribe timeouts. The eventSeq watermark is all we need.
+    const MAX_ATTEMPTS = 3;
+    const backoffMs = (attempt: number): number => 1000 * attempt; // 1s, 2s
+    let resp: ZcodeResponse;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      resp = await this.backend.request(
+        nextId(),
+        "session/subscribe",
+        {
+          sessionId: this.sid,
+          deliveryKind: "desktop-continuous",
+          includeSnapshot: false,
+          afterSeq: 0,
+        },
+        10000,
+      );
+      if (!resp.error) break; // success
+      const isTimeout = resp.error.message === "timeout";
+      if (!isTimeout || attempt === MAX_ATTEMPTS) {
+        if (isTimeout) {
+          warn(`subscribe: all ${MAX_ATTEMPTS} attempts timed out (backend unresponsive for ~30s)`);
+        }
+        throw new Error(formatSubscribeError(resp));
+      }
+      log(
+        `subscribe attempt ${attempt}/${MAX_ATTEMPTS} timed out, retrying in ${backoffMs(attempt)}ms (preempt/busy window)`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs(attempt)));
     }
-    const result = (resp.result ?? {}) as ZcodeSubscribeResult;
+    const result = (resp!.result ?? {}) as ZcodeSubscribeResult;
     this.lastSeq = result.eventSeq ?? 0;
     this.subscribed = true;
-    return result.snapshot ?? null;
+    return result.snapshot ?? { projection: undefined, messages: [] };
   }
 
   /** Called by the backend reader when a `session/event` arrives. */
@@ -128,6 +171,9 @@ export class EventStreamListener {
       10000,
     );
     if (resp.error) {
+      log(
+        `resubscribe failed (non-fatal, stall recovery degrades to polling): ${formatSubscribeError(resp)}`,
+      );
       return false;
     }
     const result = (resp.result ?? {}) as ZcodeSubscribeResult;
@@ -165,4 +211,16 @@ export class TurnMonitor {
     const result = (resp.result ?? {}) as { projection?: ZcodeProjection };
     return result.projection ?? null;
   }
+}
+
+/**
+ * Format a `session/subscribe` failure into a readable message that carries
+ * the backend's real error so the caller can distinguish root causes (reader
+ * dead, timeout, pipe broken, method-not-found on old CLI, session-level
+ * business error) instead of a single generic string.
+ */
+function formatSubscribeError(resp: ZcodeResponse): string {
+  const err = resp.error ?? { message: "unknown error" };
+  const code = err.code !== undefined && err.code !== null ? ` (code ${err.code})` : "";
+  return `session/subscribe failed: ${err.message ?? "unknown error"}${code}`;
 }

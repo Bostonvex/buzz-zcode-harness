@@ -33,6 +33,7 @@ import {
 import type { InternalEvent } from "../translators/index.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
+import { waitForTurnIdle } from "./extensions.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk } from "./io.js";
 import { handleServerRequests } from "./server-requests.js";
@@ -123,7 +124,7 @@ export async function listSessions(
   return { sessions };
 }
 
-/** `session/resume` → zcode `session/resume` (with runtimeModel overlay for resumed sessions). */
+/** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */
 export async function resumeSession(
   server: ZcodeAcpServer,
   params: acp.ResumeSessionRequest,
@@ -134,13 +135,15 @@ export async function resumeSession(
   const cwd = params.cwd ?? process.cwd();
   if (!targetSid) throw new Error("sessionId required");
 
+  // runtimeModel overlay: a resumed session may carry a stale/revoked model in
+  // its history → send fails with "历史模型不可用". Overlaying the current
+  // enabled provider redirects the session onto a working model. The overlay
+  // deliberately carries NO apiKey (the backend's schema rejects it; it resolves
+  // auth from its own config/OAuth store).
   const zcParams: Record<string, unknown> = {
     sessionId: targetSid,
     workspace: workspaceFor(cwd),
   };
-  // runtimeModel overlay: a resumed session may carry a stale provider id in
-  // its history → backend can't auth. Send the current enabled provider so the
-  // backend overlays it and uses its own OAuth creds.
   const runtimeModel = buildResumeRuntimeModel();
   if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
@@ -315,11 +318,22 @@ export async function prompt(
   differ.markSeen(baselineMsgs);
 
   // Subscribe BEFORE send so we don't lose early turn.completed on short turns.
-  const snapshot = await listener.subscribe(() => server.nextId());
-  if (snapshot === null) {
+  // subscribe() throws on failure, surfacing the backend's real error (reader
+  // dead, timeout, pipe broken, method-not-found on old CLI, session error) so
+  // the cause is distinguishable. Clean up the pending turn before propagating
+  // — this call site is outside the try/finally below.
+  let snapshot: ZcodeSnapshot;
+  try {
+    snapshot = await listener.subscribe(() => server.nextId());
+  } catch (e) {
     server.pendingTurns.delete(requestId);
-    throw new Error("session/subscribe failed (ZCode CLI 0.14.8+ required)");
+    throw e;
   }
+  // subscribe() requests includeSnapshot:false (it only needs the eventSeq
+  // watermark to arm the event stream), so `snapshot` is an empty fallback.
+  // The real projection baseline comes from fetchMessages + differ.markSeen
+  // above. Kept as a binding only so the call fits the Promise-returning shape.
+  void snapshot;
   backend.registerEventListener(zcodeSid, listener);
 
   const chunkMsgId = randomUUID();
@@ -448,10 +462,11 @@ export async function cancel(
  * `_cancel_backend_turn`: send stop with an id (some backends route by id
  * presence), never wait for a response, never throw.
  *
- * The backend's turn loop will emit turn.completed(cancelled) on its own;
- * the ACP turn loop observes that event and exits. No probing needed on the
- * prompt path — an earlier ensureTurnStopped probed session/goal show for 30s
- * but returned inconsistent values and caused severe stalls.
+ * Probing the lock afterward is the caller's job — on the preempt path
+ * (preemptInFlightTurn) we follow up with waitForTurnIdle to confirm release;
+ * the turn-loop cancel sites call this and rely on their own event-driven
+ * exit. The backend's turn loop emits turn.completed on its own (success if
+ * stop didn't catch the streaming turn in time, cancelled otherwise).
  */
 function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
   try {
@@ -536,23 +551,32 @@ async function preemptInFlightTurn(
 
   log(`  [preempt] in-flight turn ${oldRequestId} found, stopping it`);
   // Fire-and-forget stop (mirrors Python's _cancel_backend_turn). The old
-  // turn loop will receive turn.completed(cancelled) and exit on its own.
+  // turn loop will receive turn.completed and exit on its own.
   stopBackendTurn(server, zcodeSid);
 
-  // Wait for the old turn's prompt() to fully exit (its finally block deletes
-  // the pendingTurns entry). This is the synchronization point that guarantees
-  // both lock release (backend turn ended) and listener unregistration before
-  // we subscribe/send. More reliable than probing session/goal show.
+  // The old turn is already streaming (lock held), so expectLock=false: we
+  // don't need to observe the lock appearing first, only its release. Probe
+  // session/goal show until it stops reporting "prompt is running" — this is
+  // the same mechanism waitForTurnIdle uses for compact/goal, and unlike
+  // pendingTurns polling it does NOT depend on the backend emitting a
+  // cancelled event (which never comes for a streaming turn hit by stop:
+  // it completes as success, not cancelled).
+  //
+  // pendingTurns cleanup by the old turn's finally block still happens and
+  // remains the listener-overwrite guard, but we no longer BLOCK on it.
   const PREEMPT_TIMEOUT_MS = 35_000;
-  const t0 = Date.now();
-  while (server.pendingTurns.has(oldRequestId)) {
-    if (Date.now() - t0 > PREEMPT_TIMEOUT_MS) {
-      warn(`  [preempt] timed out waiting for old turn ${oldRequestId} to exit`);
-      return; // best-effort: continue anyway, session/send may fail
-    }
-    await sleep(200);
+  const released = await waitForTurnIdle(
+    server,
+    zcodeSid,
+    PREEMPT_TIMEOUT_MS,
+    "session/goal",
+    false, // old turn already holds the lock; just wait for release
+  );
+  if (!released) {
+    warn(`  [preempt] lock wait timed out for old turn ${oldRequestId}, proceeding best-effort`);
+  } else {
+    log(`  [preempt] old turn ${oldRequestId} lock released, proceeding`);
   }
-  log(`  [preempt] old turn ${oldRequestId} exited, proceeding`);
 }
 
 // ---------- internals ----------

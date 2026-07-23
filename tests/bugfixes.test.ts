@@ -8,14 +8,14 @@
  * Bug I  — stableStringify sorts keys (stable plan signature).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { flattenTodos } from "../src/handlers/session.js";
 import { CONFIG_META } from "../src/utils.js";
-import type { ZcodeEvent } from "../src/backend/types.js";
+import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
 
 /** Build a listener over a fake backend (no subprocess; we drive handleEvent). */
 function makeListener(): EventStreamListener {
@@ -47,6 +47,125 @@ describe("Bug A: pollEvent zombie waiter", () => {
     listener.handleEvent(makeEvent(1, "turn.started"));
     const r = await pollP;
     expect(r?.type).toBe("turn.started");
+  });
+});
+
+describe('subscribe error surfacing (no more misleading "0.14.8 required")', () => {
+  // Before the fix, subscribe() returned null on ANY backend error and the
+  // caller threw a hardcoded "session/subscribe failed (ZCode CLI 0.14.8+
+  // required)" string. That misled users whose CLI was already new — the real
+  // cause (backend dead / timeout / pipe broken / session error) was swallowed.
+  // Now subscribe() throws with the backend's real error message.
+
+  it("throws with the backend's real error message on reader-dead failure", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "zcode backend reader exited (backend dead)" },
+    });
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(
+      /session\/subscribe failed: zcode backend reader exited/,
+    );
+    // Crucially, the error must NOT blame the CLI version.
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(/^((?!0\.14\.8).)*$/s);
+  });
+
+  it("includes the error code when the backend provides one (old CLI method-not-found)", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "method not found", code: -32601 },
+    });
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(
+      /session\/subscribe failed: method not found \(code -32601\)/,
+    );
+  });
+
+  it("returns the snapshot (not null) on success", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const snap = { projection: { status: "idle" }, messages: [] };
+    vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      result: { eventSeq: 5, snapshot: snap },
+    } as ZcodeResponse);
+    const result = await listener.subscribe(() => 1);
+    expect(result).toEqual(snap);
+    expect(listener.subscribed).toBe(true);
+    expect(listener.lastSeq).toBe(5);
+  });
+});
+
+describe("subscribe retries transient timeout (preempt busy window)", () => {
+  // After a preempt the backend can be briefly busy; a subscribe issued in that
+  // window times out. subscribe() should retry transient timeouts and succeed
+  // once the backend recovers, instead of failing the turn.
+
+  it("retries on timeout and succeeds on a later attempt", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const snap = { projection: { status: "idle" }, messages: [] };
+    const requestSpy = vi.spyOn(fake, "request");
+    requestSpy
+      .mockResolvedValueOnce({ id: 1, error: { message: "timeout" } })
+      .mockResolvedValueOnce({ id: 2, error: { message: "timeout" } })
+      .mockResolvedValueOnce({
+        id: 3,
+        result: { eventSeq: 5, snapshot: snap },
+      } as ZcodeResponse);
+    // Fake timers so the backoff sleeps don't slow the test.
+    vi.useFakeTimers();
+    const subP = listener.subscribe(() => 1);
+    // Flush the backoff sleeps interleaved with the awaits.
+    await vi.runAllTimersAsync();
+    const result = await subP;
+    vi.useRealTimers();
+    expect(result).toEqual(snap);
+    expect(listener.subscribed).toBe(true);
+    expect(listener.lastSeq).toBe(5);
+    expect(requestSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("does NOT retry on non-transient errors (reader dead)", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const requestSpy = vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "zcode backend reader exited (backend dead)" },
+    } as ZcodeResponse);
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(/reader exited/);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry on method-not-found (old CLI)", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const requestSpy = vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "method not found", code: -32601 },
+    } as ZcodeResponse);
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(/method not found \(code -32601\)/);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws after exhausting all retries", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "timeout" },
+    } as ZcodeResponse);
+    vi.useFakeTimers();
+    // Attach the rejection handler up front so the eventual rejection is never
+    // "unhandled" during the timer flush window.
+    const subP = listener.subscribe(() => 1).catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const err = await subP;
+    vi.useRealTimers();
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/session\/subscribe failed: timeout/);
   });
 });
 
