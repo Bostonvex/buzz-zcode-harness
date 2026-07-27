@@ -552,21 +552,67 @@ mechanisms based on client capabilities:
       "properties": {
         "q_0": {
           "type": "string",
-          "enum": ["auth.test.ts", "user.test.ts"],
-          "title": "Select the files to test"
+          "title": "Select the files to test",
+          "oneOf": [
+            { "const": "auth.test.ts", "title": "auth.test.ts" },
+            { "const": "user.test.ts", "title": "user.test.ts" },
+            { "const": "__skip__", "title": "Skip this question" }
+          ]
+        },
+        "q_0_other": {
+          "type": "string",
+          "title": "↳    or type a custom value (overrides the selection)"
         }
       },
-      "required": ["q_0"]
+      "required": []
     }
   }
 }
 ```
+
+ACP/MCP elicitation string fields are EITHER an enum (restricted dropdown) OR
+free text — the spec forbids a single field that is both. So each question is
+rendered as TWO fields: `q_<i>` (a `oneOf`/`anyOf` enum dropdown of the model's
+suggested answers, with a trailing "Skip this question" option whose `const` is
+the `__skip__` sentinel and whose `title` is the readable label) and
+`q_<i>_other` (a free-text companion). On submit, a non-empty `q_<i>_other`
+overrides the dropdown (single-select) or is appended to the picked values
+(multi-select); selecting "Skip this question" or leaving both blank skips just
+that question without cancelling the form.
 
 **elicitation response** (accept/decline/cancel):
 ```json
 {
   "action": "accept",
   "content": { "q_0": "auth.test.ts" }
+}
+```
+
+**ExitPlanMode elicitation form** — single `feedback` text field; no
+approve/reject dropdown. The client's own submit button is the approve action;
+typing into the field is the reject action. Submitting with the field empty
+approves the plan; submitting with text rejects it and returns the text to
+zcode as the decline `reason` (so the agent sees the redirection when it
+re-plans). The cancel/decline button is a plain reject with no reason.
+```json
+{
+  "method": "elicitation/create",
+  "params": {
+    "mode": "form",
+    "sessionId": "sess_abc123",
+    "message": "Ready to code?\n\n1. Implement login\n2. Implement signup\n\nLeave the box empty and submit to approve; type feedback to reject and redirect.",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {
+        "feedback": {
+          "type": "string",
+          "title": "Feedback",
+          "description": "Empty = approve the plan. Anything typed = reject and use this text as the redirection."
+        }
+      },
+      "required": []
+    }
+  }
 }
 ```
 

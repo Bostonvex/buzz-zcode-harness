@@ -286,14 +286,34 @@ describe("elicitation form: AskUserQuestion", () => {
     ],
   };
 
-  it("single-select enum includes a trailing Skip option", () => {
+  it("single-select: enum dropdown + companion free-text field", () => {
     const form = buildAskUserElicitationForm(baseParams, "acp_1");
-    const prop = form.requestedSchema.properties.q_0 as { enum: string[] };
-    expect(prop.enum).toEqual(["Red", "Blue", "__skip__"]);
-    expect(form.requestedSchema.required).toEqual(["q_0"]);
+    const prop = form.requestedSchema.properties.q_0 as {
+      type: string;
+      oneOf?: Array<{ const: string; title: string }>;
+    };
+    expect(prop.type).toBe("string");
+    expect(prop.oneOf).toEqual([
+      { const: "Red", title: "Red" },
+      { const: "Blue", title: "Blue" },
+      { const: "__skip__", title: "Skip this question" },
+    ]);
+    // Companion free-text override field — "↳" + padding marks it as a
+    // continuation of the question above; self-contained title, no description.
+    const other = form.requestedSchema.properties.q_0_other as {
+      type: string;
+      title: string;
+      description?: string;
+    };
+    expect(other.type).toBe("string");
+    expect(other.title).toMatch(/^↳\s+/);
+    expect(other.title).toContain("custom value");
+    expect(other.title).toContain("overrides");
+    expect(other.description).toBeUndefined();
+    expect(form.requestedSchema.required).toEqual([]);
   });
 
-  it("multi-select fields are arrays and not required", () => {
+  it("multi-select: array enum (anyOf titled) + companion free-text field", () => {
     const params = {
       ...baseParams,
       questions: [
@@ -310,12 +330,15 @@ describe("elicitation form: AskUserQuestion", () => {
     const form = buildAskUserElicitationForm(params, "acp_1");
     const prop = form.requestedSchema.properties.q_0 as {
       type: string;
-      items: { type: string; enum: string[] };
+      items: { anyOf: Array<{ const: string; title: string }> };
     };
     expect(prop.type).toBe("array");
-    expect(prop.items.type).toBe("string");
-    expect(prop.items.enum).toEqual(["a.ts", "b.ts"]);
-    expect(form.requestedSchema.required).not.toContain("q_0");
+    expect(prop.items.anyOf).toEqual([
+      { const: "a.ts", title: "a.ts" },
+      { const: "b.ts", title: "b.ts" },
+    ]);
+    expect(form.requestedSchema.properties.q_0_other).toBeDefined();
+    expect(form.requestedSchema.required).toEqual([]);
   });
 
   it("attaches toolCallId scope when provided", () => {
@@ -329,7 +352,7 @@ describe("elicitation form: AskUserQuestion", () => {
     expect(form.toolCallId).toBeUndefined();
   });
 
-  it("parse maps answers back by question text", () => {
+  it("parse: dropdown selection maps back by question text", () => {
     const answers = parseAskUserElicitationResponse(
       { action: "accept", content: { q_0: "Red" } },
       baseParams,
@@ -337,7 +360,31 @@ describe("elicitation form: AskUserQuestion", () => {
     expect(answers).toEqual({ "Pick a color": "Red" });
   });
 
-  it("parse multi-select joins with ', '", () => {
+  it("parse: free-text override wins over dropdown (single-select)", () => {
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: "Red", q_0_other: "magenta" } },
+      baseParams,
+    );
+    expect(answers).toEqual({ "Pick a color": "magenta" });
+  });
+
+  it("parse: skip sentinel omitted (single-select)", () => {
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: "__skip__" } },
+      baseParams,
+    );
+    expect(answers).toEqual({});
+  });
+
+  it("parse: empty dropdown + empty free-text = skipped (single-select)", () => {
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: "", q_0_other: "   " } },
+      baseParams,
+    );
+    expect(answers).toEqual({});
+  });
+
+  it("parse: multi-select merges dropdown picks + free-text (deduped)", () => {
     const params = {
       ...baseParams,
       questions: [
@@ -352,19 +399,63 @@ describe("elicitation form: AskUserQuestion", () => {
       ],
     };
     const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: ["a.ts", "b.ts"] } },
+      { action: "accept", content: { q_0: ["a.ts", "b.ts"], q_0_other: "c.ts" } },
       params,
     );
-    expect(answers).toEqual({ "Pick files": "a.ts, b.ts" });
+    expect(answers).toEqual({ "Pick files": "a.ts, b.ts, c.ts" });
   });
 
-  it("parse skips the __skip__ sentinel (single-select)", () => {
+  it("parse: multi-select dedupes when free-text repeats a pick", () => {
+    const params = {
+      ...baseParams,
+      questions: [
+        {
+          question: "Pick files",
+          multiSelect: true,
+          options: [{ label: "a.ts", value: "a" }],
+        },
+      ],
+    };
     const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: "__skip__" } },
-      baseParams,
+      { action: "accept", content: { q_0: ["a.ts"], q_0_other: "a.ts" } },
+      params,
     );
-    // Skipped question is omitted from the answers map (parity with
-    // request_permission path leaving it unanswered on Skip).
+    expect(answers).toEqual({ "Pick files": "a.ts" });
+  });
+
+  it("parse: multi-select with only free-text", () => {
+    const params = {
+      ...baseParams,
+      questions: [
+        {
+          question: "Pick files",
+          multiSelect: true,
+          options: [{ label: "a.ts", value: "a" }],
+        },
+      ],
+    };
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: [], q_0_other: "custom.ts" } },
+      params,
+    );
+    expect(answers).toEqual({ "Pick files": "custom.ts" });
+  });
+
+  it("parse: empty multi-select + empty free-text = skipped", () => {
+    const params = {
+      ...baseParams,
+      questions: [
+        {
+          question: "Pick files",
+          multiSelect: true,
+          options: [{ label: "a.ts", value: "a" }],
+        },
+      ],
+    };
+    const answers = parseAskUserElicitationResponse(
+      { action: "accept", content: { q_0: [], q_0_other: "" } },
+      params,
+    );
     expect(answers).toEqual({});
   });
 
@@ -383,10 +474,11 @@ describe("elicitation form: ExitPlanMode", () => {
     input: { plan: "Step 1\nStep 2" },
   };
 
-  it("embeds the plan text in the message", () => {
+  it("embeds the plan text + approve/reject hint in the message", () => {
     const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
     expect(form.message).toContain("Step 1");
     expect(form.message).toContain("Ready to code?");
+    expect(form.message).toContain("Leave the box empty and submit to approve");
   });
 
   it("attaches toolCallId scope when provided", () => {
@@ -394,20 +486,40 @@ describe("elicitation form: ExitPlanMode", () => {
     expect(form.toolCallId).toBe("tc_2");
   });
 
-  it("approve → accept with answer_0", () => {
+  it("has only a feedback field, not required (empty submit = approve)", () => {
+    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
+    const keys = Object.keys(form.requestedSchema.properties);
+    expect(keys).toEqual(["feedback"]);
+    expect(form.requestedSchema.required).toEqual([]);
+  });
+
+  it("accept with empty feedback → approve", () => {
     const resp = parseExitPlanModeElicitationResponse({
       action: "accept",
-      content: { decision: "approve" },
+      content: { feedback: "" },
     });
     expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
   });
 
-  it("reject → decline", () => {
+  it("accept with whitespace-only feedback → approve (trimmed to empty)", () => {
     const resp = parseExitPlanModeElicitationResponse({
       action: "accept",
-      content: { decision: "reject" },
+      content: { feedback: "   " },
     });
-    expect(resp.action).toBe("decline");
+    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
+  });
+
+  it("accept with feedback → decline carrying the feedback as reason", () => {
+    const resp = parseExitPlanModeElicitationResponse({
+      action: "accept",
+      content: { feedback: "  do login first  " },
+    });
+    expect(resp).toEqual({ action: "decline", reason: "do login first" });
+  });
+
+  it("accept with missing content → approve (treated as empty)", () => {
+    const resp = parseExitPlanModeElicitationResponse({ action: "accept", content: null });
+    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
   });
 
   it("cancel → decline", () => {
