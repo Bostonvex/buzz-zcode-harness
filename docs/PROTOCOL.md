@@ -78,7 +78,10 @@ Messages are classified by the presence of `id` and `method`:
 
 ### `session/create`
 
-Create a new session.
+Create a new session. Note: the bridge defers this call until a session's
+first use — ACP `session/new` returns a local placeholder id and materializes
+the backend session (this RPC) on the first prompt / config change / extension
+method, so an editor startup that never sends a message leaves no session.
 
 **Request:**
 ```json
@@ -130,6 +133,13 @@ List all sessions.
 ### `session/resume`
 
 Resume an existing session.
+
+The sessionId may be a lazy `session/new` placeholder (the editor persists it
+and resumes it after a bridge restart). The bridge resolves it before the
+backend call: an in-memory or persisted (`acp-lazy-sessions.json`) mapping is
+followed to the real backend session — resuming it, or materializing a fresh
+empty one if the placeholder was never used. Real ids from `session/list` pass
+through unchanged.
 
 **Request:**
 ```json

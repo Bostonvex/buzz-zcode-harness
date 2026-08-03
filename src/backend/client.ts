@@ -36,7 +36,7 @@ interface PendingRequest {
 
 /** A server→client request that we must reply to. */
 export interface ServerRequest {
-  id: number;
+  id: number | string;
   method: string;
   params:
     ZcodeInteractionPermissionParams | ZcodeInteractionUserInputParams | Record<string, unknown>;
@@ -161,6 +161,18 @@ export class ZcodeBackend {
       // id + method: our pending response wins the race; else it's a server→client request.
       if (this.pending.has(id)) {
         this.resolvePending(id, msg as unknown as ZcodeResponse);
+      } else if (method === "session/requestRuntimePreferences") {
+        // Newer app-servers block `session/create` until this handshake is
+        // answered. Reply with defaults — no editor interaction needed.
+        // Keep askUserQuestionAutoResolutionEnabled false so AskUserQuestion
+        // still flows through the bridge's interaction path instead of being
+        // auto-resolved server-side. Without this reply, create hangs.
+        log(`backend: auto-replying ${method} (id=${String(id)}) with default preferences`);
+        this.sendReply(id, {
+          nativeSearchEnhancementsEnabled: false,
+          memoryEnabled: false,
+          askUserQuestionAutoResolutionEnabled: false,
+        });
       } else {
         this.serverRequests.push({
           id,
@@ -174,23 +186,41 @@ export class ZcodeBackend {
       // Notification.
       if (method === "session/event") {
         const ev = (msg.params ?? {}) as unknown as ZcodeEvent;
-        const sid = ev.sessionId;
-        const set = sid ? this.listeners.get(sid) : undefined;
-        if (set) {
-          // Iterate a snapshot so a listener that (un)registers during dispatch
-          // doesn't mutate the set under us.
-          for (const listener of [...set]) {
-            try {
-              listener.handleEvent(ev);
-            } catch (e) {
-              warn(
-                `backend: listener.handleEvent threw: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
-          }
+        this.dispatchEvent(ev);
+      } else if (method === "state.updated") {
+        // Session settings changed (model/mode/thoughtLevel switch, incl.
+        // mid-turn). The params carry the authoritative full settings patch:
+        //   { patch: {mode, model, thoughtLevel, …}, reason, revision, sessionId }
+        // Wrap as a ZcodeEvent so it flows through the same listener pipeline.
+        const params = (msg.params ?? {}) as Record<string, unknown>;
+        const ev: ZcodeEvent = {
+          sessionId: String(params.sessionId ?? ""),
+          seq: 0,
+          type: "state.updated",
+          payload: params,
+        };
+        this.dispatchEvent(ev);
+      }
+      // Other notifications are currently ignored (process/resourceSample, …).
+    }
+  }
+
+  /** Deliver a ZcodeEvent to every listener registered for its session. */
+  private dispatchEvent(ev: ZcodeEvent): void {
+    const sid = ev.sessionId;
+    const set = sid ? this.listeners.get(sid) : undefined;
+    if (set) {
+      // Iterate a snapshot so a listener that (un)registers during dispatch
+      // doesn't mutate the set under us.
+      for (const listener of [...set]) {
+        try {
+          listener.handleEvent(ev);
+        } catch (e) {
+          warn(
+            `backend: listener.handleEvent threw: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
       }
-      // Other notifications are currently ignored (state.updated, etc.).
     }
   }
 
@@ -251,7 +281,7 @@ export class ZcodeBackend {
   }
 
   /** Reply to a zcode server→client request with a result (id + result). */
-  sendReply(id: number, result: unknown): void {
+  sendReply(id: number | string, result: unknown): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
       warn("backend: sendReply dropped (stdin closed)");
@@ -264,7 +294,7 @@ export class ZcodeBackend {
   }
 
   /** Reply to a zcode server→client request with an error. */
-  sendError(id: number, code: number, message: string): void {
+  sendError(id: number | string, code: number, message: string): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
       warn("backend: sendError dropped (stdin closed)");

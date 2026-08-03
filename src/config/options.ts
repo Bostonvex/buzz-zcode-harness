@@ -48,18 +48,25 @@ export interface ModelRef {
 }
 
 /**
- * Collect models from ALL enabled providers in config.json.
+ * Collect models from config.json for the dropdown.
  *
- * Only providers with `enabled: true` are listed — unenabled providers
- * (including builtins without an `enabled` flag) are excluded so the dropdown
- * reflects exactly what the user has activated in the ZCode desktop app.
+ * Builtin providers (id prefix `builtin:`) must be `enabled: true` — they
+ * reflect the plans the user activated in the ZCode desktop app. Custom
+ * (third-party) providers are included UNLESS explicitly `enabled: false`:
+ * the newer CLI leaves the flag unset on active third-party providers, so
+ * treating "absent" as enabled keeps them in the dropdown while still
+ * honoring an explicit disable.
  */
 export function loadAllModels(): ModelRef[] {
   try {
     const cfg = readConfig() as ConfigShape;
     const out: ModelRef[] = [];
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
-      if (!p?.enabled) continue;
+      if (isBuiltinProvider(pid)) {
+        if (p?.enabled !== true) continue;
+      } else if (p?.enabled === false) {
+        continue;
+      }
       const providerName = p.name ?? pid;
       for (const modelId of Object.keys(p.models ?? {})) {
         out.push({ providerId: pid, providerName, modelId });
@@ -107,7 +114,7 @@ export function modelContextWindow(providerId: string, modelId: string): number 
 }
 
 /** Builtin providerIds are prefixed with `builtin:` (e.g. `builtin:bigmodel`). */
-function isBuiltinProvider(providerId: string): boolean {
+export function isBuiltinProvider(providerId: string): boolean {
   return providerId.startsWith("builtin:");
 }
 
@@ -144,19 +151,23 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
   return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
 
-/** Build the ACP SessionModeState ({currentModeId, availableModes}). */
+/** Build the ACP SessionModeState ({currentModeId, availableModes}).
+ *  zcodeSid null = pending session (session/new not yet materialized) — skip
+ *  the backend read and return defaults. */
 export async function buildModes(
   server: ZcodeAcpServer,
-  zcodeSid: string,
+  zcodeSid: string | null,
 ): Promise<acp.SessionModeState> {
   let currentMode = "yolo";
-  try {
-    const read = await sessionRead(server, zcodeSid);
-    const settings = (read.settings ?? {}) as Record<string, unknown>;
-    const modeSet = (settings.mode as Record<string, unknown>) ?? {};
-    currentMode = (modeSet.current as string) ?? currentMode;
-  } catch {
-    // keep default
+  if (zcodeSid !== null) {
+    try {
+      const read = await sessionRead(server, zcodeSid);
+      const settings = (read.settings ?? {}) as Record<string, unknown>;
+      const modeSet = (settings.mode as Record<string, unknown>) ?? {};
+      currentMode = (modeSet.current as string) ?? currentMode;
+    } catch {
+      // keep default
+    }
   }
   return {
     currentModeId: currentMode,
@@ -170,36 +181,41 @@ export async function buildModes(
   };
 }
 
-/** Build the ACP configOptions array (3 items: model/mode/thought). */
+/** Build the ACP configOptions array (3 items: model/mode/thought).
+ *  zcodeSid null = pending session — skip the backend read and use defaults;
+ *  mode defaults to "yolo" (the mode session/create hardcodes) so the dropdown
+ *  matches the mode indicator for a fresh session. */
 export async function buildConfigOptions(
   server: ZcodeAcpServer,
-  zcodeSid: string,
+  zcodeSid: string | null,
 ): Promise<acp.SessionConfigOption[]> {
   let currentProviderId = "";
   let currentModelId = "GLM-5.2";
-  let currentMode = "build";
+  let currentMode = zcodeSid === null ? "yolo" : "build";
   let currentThought = "high";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
 
-  try {
-    const read = await sessionRead(server, zcodeSid);
-    const settings = (read.settings ?? {}) as Record<string, unknown>;
-    const modeSet = (settings.mode as Record<string, unknown>) ?? {};
-    currentMode = (modeSet.current as string) ?? currentMode;
-    const modelSet = (settings.model as Record<string, unknown>) ?? {};
-    // settings.model.current is { providerId, modelId, variant? } — read BOTH so
-    // we can disambiguate same-named models across providers.
-    const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
-    if (cur.providerId) currentProviderId = cur.providerId;
-    if (cur.modelId) currentModelId = cur.modelId;
-    const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
-    currentThought = (tlSet.current as string) ?? currentThought;
-    const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
-    if (tlAvail.length > 0) {
-      thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
+  if (zcodeSid !== null) {
+    try {
+      const read = await sessionRead(server, zcodeSid);
+      const settings = (read.settings ?? {}) as Record<string, unknown>;
+      const modeSet = (settings.mode as Record<string, unknown>) ?? {};
+      currentMode = (modeSet.current as string) ?? currentMode;
+      const modelSet = (settings.model as Record<string, unknown>) ?? {};
+      // settings.model.current is { providerId, modelId, variant? } — read BOTH so
+      // we can disambiguate same-named models across providers.
+      const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
+      if (cur.providerId) currentProviderId = cur.providerId;
+      if (cur.modelId) currentModelId = cur.modelId;
+      const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
+      currentThought = (tlSet.current as string) ?? currentThought;
+      const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
+      if (tlAvail.length > 0) {
+        thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
+      }
+    } catch {
+      // keep defaults
     }
-  } catch {
-    // keep defaults
   }
 
   // currentValue encodes provider+model so the switch handler can locate the
@@ -330,7 +346,9 @@ export async function emitConfigOptionUpdate(
         size,
       });
     } catch (e) {
-      log(`options: usage_update after model switch failed (${e instanceof Error ? e.message : String(e)})`);
+      log(
+        `options: usage_update after model switch failed (${e instanceof Error ? e.message : String(e)})`,
+      );
     }
   }
   return options;
