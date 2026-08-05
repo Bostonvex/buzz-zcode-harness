@@ -33,6 +33,13 @@ export interface PendingTurn {
   cancelled: boolean;
   /** Set once session/stop has been fired for this turn, to avoid re-sending. */
   stopSent?: boolean;
+  /**
+   * Set when the turn was ended by the stall-recovery heuristic (backend
+   * reported idle after a silence) rather than a real turn.completed event.
+   * prompt() skips auto-compact for such turns — the completion was inferred,
+   * and compressing an in-flight task's context would destroy the work.
+   */
+  stallRecovered?: boolean;
 }
 
 export class ZcodeAcpServer {
@@ -90,6 +97,13 @@ export class ZcodeAcpServer {
   readonly titleEligibleSessions = new Set<string>();
   /** Last mode id advertised to the client (acp_sid → modeId), for change detection. */
   readonly lastMode = new Map<string, string>();
+  /**
+   * Timestamp of the last cancel (user stop or preempt), keyed by zcodeSid.
+   * Set in cancel() and preemptInFlightTurn(); read in runEventTurn's stall
+   * reconciliation to fast-fail turns that collide with the backend's
+   * ~20s model-connection recovery window after a mid-stream abort.
+   */
+  readonly lastCancelledAt = new Map<string, number>();
   /** Per-session ProjectionDiffers (persists across turns). */
   readonly differs = new Map<
     string,
