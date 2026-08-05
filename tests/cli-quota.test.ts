@@ -98,4 +98,53 @@ describe("parseArgs", () => {
     expect(opts.intervalMs).toBe(30_000);
     expect(opts.intervalClamped).toBe(false);
   });
+
+  it("defaults provider to 'all' when no positional arg given", () => {
+    expect(parseArgs([]).provider).toBe("all");
+    expect(parseArgs(["-w"]).provider).toBe("all");
+  });
+
+  it("'glm' / 'go' positional → the matching provider", () => {
+    expect(parseArgs(["glm"]).provider).toBe("glm");
+    expect(parseArgs(["go"]).provider).toBe("go");
+  });
+
+  it("provider combines with flags in any order", () => {
+    expect(parseArgs(["go", "-w"]).provider).toBe("go");
+    expect(parseArgs(["-w", "glm"]).provider).toBe("glm");
+    expect(parseArgs(["glm", "-d", "-i", "60"]).provider).toBe("glm");
+  });
+
+  it("only the first provider token is honored", () => {
+    expect(parseArgs(["glm", "go"]).provider).toBe("glm");
+  });
+
+  it("non-provider positional tokens are ignored (falls back to all)", () => {
+    expect(parseArgs(["bogus"]).provider).toBe("all");
+    expect(parseArgs(["-w", "unknown"]).provider).toBe("all");
+  });
+});
+
+describe("parseArgs — plain flag", () => {
+  it("empty argv → plain defaults to false", () => {
+    expect(parseArgs([]).plain).toBe(false);
+  });
+
+  it("-p / --plain set plain to true", () => {
+    expect(parseArgs(["-p"]).plain).toBe(true);
+    expect(parseArgs(["--plain"]).plain).toBe(true);
+  });
+
+  it("plain combines with provider and watch flags in any order", () => {
+    expect(parseArgs(["--plain", "go"]).plain).toBe(true);
+    expect(parseArgs(["go", "--plain"]).plain).toBe(true);
+    expect(parseArgs(["-w", "-p"]).plain).toBe(true);
+    expect(parseArgs(["-p", "-w", "glm"]).plain).toBe(true);
+  });
+
+  it("plain is independent of detail (-d)", () => {
+    const opts = parseArgs(["-p", "-d"]);
+    expect(opts.plain).toBe(true);
+    expect(opts.detail).toBe(true);
+  });
 });

@@ -91,19 +91,38 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 ## Standalone Quota CLI
 
 Besides the ACP server, the package ships a `zcode-quota` bin that queries
-your GLM Coding Plan usage **from the terminal** — no editor or running server
-needed. It reads the same `~/.zcode/v2/config.json` for credentials.
+your usage **from the terminal** — no editor or running server needed. By
+default it shows both **GLM Coding Plan** and **Opencode Go** in one card;
+pass a provider to focus on one.
+
+GLM credentials are read from `~/.zcode/v2/config.json`. Opencode Go
+credentials come from environment variables (the dashboard needs a browser
+cookie — see [Opencode Go setup](#opencode-go-setup) below).
 
 ```bash
-# One-shot: print the card and exit
+# Both providers (default): GLM + Opencode Go in one card
 zcode-quota
+
+# Focus on one provider
+zcode-quota glm            # GLM Coding Plan only
+zcode-quota go             # Opencode Go only (rolling + weekly + monthly)
 
 # Live monitor: clear the screen and refresh every 30s (default)
 zcode-quota -w
+zcode-quota go -w          # watch Opencode Go only
 
 # Refresh at a custom interval (seconds; minimum 10)
 zcode-quota --watch --interval 60
+
+# Plain monochrome bars (color is the default on a terminal)
+zcode-quota --plain
 ```
+
+By default the CLI renders heat-colored (green→yellow→red) progress bars with
+the usage numbers overlaid inside the bar, so each line stays short. Pass
+`--plain` (or `-p`) for the classic monochrome `█`/`░` layout. Color is also
+disabled automatically when stdout is piped or redirected, so captured output
+stays clean.
 
 The watch mode clears and redraws the card in place, like `top`/`htop`. Press
 `Ctrl-C` to exit. The 10s minimum exists because the quota API is cached for
@@ -115,6 +134,38 @@ When the package isn't globally installed, run the built file directly:
 ```bash
 node dist/bin/quota.js -w
 ```
+
+### Opencode Go setup
+
+Opencode Go has no JSON API for subscription usage — the CLI scrapes the
+authenticated dashboard at `opencode.ai/workspace/<id>/go`, so it needs your
+browser `auth` cookie. Credentials are read from two sources, **merged
+field-by-field with environment variables taking precedence** over the config
+file:
+
+- **Config file**: `~/.pi/agent/opencode-go.json` — same convention as the
+  `@beyona/pi-zai-usage` Pi extension, so if you already configured it there
+  you're done.
+  ```json
+  { "workspaceId": "wrk_your_workspace_id", "authCookie": "Fe26.2**your_cookie_value" }
+  ```
+- **Environment variables** (override the matching file field):
+  ```bash
+  export OPENCODE_GO_WORKSPACE_ID="wrk_your_workspace_id"
+  export OPENCODE_GO_AUTH_COOKIE="Fe26.2**your_cookie_value"
+  ```
+
+How to get the values:
+
+1. **Workspace ID** — open `https://opencode.ai`, navigate to your Go
+   workspace, and copy the `wrk_…` id from the URL
+   (`https://opencode.ai/workspace/<wrk_…>/go`).
+2. **Auth cookie** — open browser DevTools (F12) → Application → Cookies →
+   `opencode.ai` → copy the value of the cookie named `auth` (it starts with
+   `Fe26.2**`).
+
+Without credentials, the default dual-provider mode silently shows GLM only
+(no error). Running `zcode-quota go` without credentials prints a setup hint.
 
 ## ACP Registry
 

@@ -21,8 +21,20 @@
 
 import process from "node:process";
 
-import { clearCache } from "../quota/cache.js";
-import { formatQuotaPlain, queryQuota } from "../quota/index.js";
+import { clearCache as clearGlmCache } from "../quota/cache.js";
+import {
+  defaultGoWindows,
+  formatCombinedCardPlain,
+  queryCombined,
+  type Provider,
+} from "../quota/combined.js";
+import { clearGoCache } from "../quota/opencode-go/index.js";
+
+/** Clear both provider caches — used by watch mode per tick for live values. */
+function clearAllCaches(): void {
+  clearGlmCache();
+  clearGoCache();
+}
 
 /** Minimum watch interval (ms). Equals the quota cache TTL. */
 const MIN_INTERVAL_MS = 10_000;
@@ -46,25 +58,46 @@ export interface CliOptions {
   /** True when the user wants per-model MCP detail sub-lines shown. */
   detail: boolean;
   help: boolean;
+  /** Which provider(s) to query — first positional arg (`glm`/`go`), else `all`. */
+  provider: Provider;
+  /** True when the user explicitly asked for the plain monochrome layout. */
+  plain: boolean;
 }
 
 /** Human-readable usage text. */
-const HELP_TEXT = `Usage: zcode-quota [options]
+const HELP_TEXT = `Usage: zcode-quota [provider] [options]
 
-Query GLM Coding Plan usage from the terminal. Reads credentials from
-~/.zcode/v2/config.json (created by the ZCode app) — no server needed.
+Query usage from the terminal. By default shows both GLM Coding Plan and
+Opencode Go in one card; pass a provider to focus on one.
+
+Providers:
+  (none)                    Both GLM + Opencode Go (rolling + weekly + monthly).
+  glm                       GLM Coding Plan only.
+  go                        Opencode Go only (rolling + weekly + monthly).
+
+GLM credentials: read from ~/.zcode/v2/config.json (created by the ZCode app).
+Opencode Go credentials (env vars override the config file, field by field):
+  Config file  ~/.pi/agent/opencode-go.json   {"workspaceId":"wrk_…","authCookie":"Fe26.2**…"}
+  OPENCODE_GO_WORKSPACE_ID    e.g. wrk_abc123 (from the opencode.ai workspace URL)
+  OPENCODE_GO_AUTH_COOKIE     the "auth" cookie value (starts with Fe26.2**)
+  Get the cookie via browser DevTools → Application → Cookies → opencode.ai.
 
 Options:
   -w, --watch              Watch mode: clear the screen and refresh periodically.
   -i, --interval <seconds> Refresh interval for watch mode (default 30, min 10).
-  -d, --detail             Show per-model MCP usage detail sub-lines.
+  -d, --detail             Show per-model MCP usage detail sub-lines (GLM only).
+  -p, --plain              Plain monochrome bars (no color, no in-bar overlay).
+                           Color is the default on a terminal; disabled
+                           automatically when stdout is piped or redirected.
   -h, --help               Show this help and exit.
 
 Examples:
-  zcode-quota                 # print once and exit
-  zcode-quota -w              # live monitor, refresh every 30s
-  zcode-quota -w -i 60        # refresh every 60s
-  zcode-quota -d              # include per-model MCP breakdown`;
+  zcode-quota                 # both providers, print once and exit (color bars)
+  zcode-quota go              # Opencode Go only (3 windows)
+  zcode-quota glm -w          # GLM only, live monitor every 30s
+  zcode-quota -w -i 60        # both, refresh every 60s
+  zcode-quota -d              # both, include per-model MCP breakdown
+  zcode-quota --plain         # both, classic monochrome bars`;
 
 /**
  * Clamp a raw interval (seconds, optional) to a valid ms value. Returns the
@@ -83,13 +116,18 @@ export function resolveIntervalMs(seconds: number | undefined): { ms: number; cl
 /**
  * Parse argv into {@link CliOptions}. Supports `-w`/`--watch`, `-h`/`--help`,
  * `-i <n>`/`--interval <n>` (space), `--interval=<n>`, and `-i<n>` (attached).
- * Unknown flags are ignored. Exported for unit testing.
+ * The first non-flag positional arg is the provider (`glm`/`go`); any other
+ * value is ignored (treated as `all`). Unknown flags are ignored.
+ *
+ * Exported for unit testing.
  */
 export function parseArgs(argv: readonly string[]): CliOptions {
   let watch = false;
   let help = false;
   let detail = false;
+  let plain = false;
   let interval: number | undefined;
+  let provider: Provider = "all";
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -101,6 +139,10 @@ export function parseArgs(argv: readonly string[]): CliOptions {
       case "-d":
       case "--detail":
         detail = true;
+        break;
+      case "-p":
+      case "--plain":
+        plain = true;
         break;
       case "-h":
       case "--help":
@@ -124,20 +166,26 @@ export function parseArgs(argv: readonly string[]): CliOptions {
         } else if (arg?.startsWith("-i") && arg.length > 2) {
           const n = Number(arg.slice(2));
           if (Number.isFinite(n)) interval = n;
+        } else if (arg === "glm" || arg === "go") {
+          // First positional provider token. Only honor the first; a second
+          // (e.g. `zcode-quota glm go`) is ignored to keep parsing simple.
+          if (provider === "all") provider = arg;
         }
+        // Other non-flag tokens are ignored (forward-compat / typos).
         break;
     }
   }
 
   const resolved = resolveIntervalMs(interval);
-  return { watch, detail, help, intervalMs: resolved.ms, intervalClamped: resolved.clamped };
-}
-
-/** Format the current wall-clock as `HH:MM:SS` for the watch freshness stamp. */
-function timestamp(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return {
+    watch,
+    detail,
+    help,
+    plain,
+    provider,
+    intervalMs: resolved.ms,
+    intervalClamped: resolved.clamped,
+  };
 }
 
 /**
@@ -162,30 +210,75 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Render the footer line (the last line of a watch frame). */
-function renderFooter(updatedAt: string, remainingSec: number): string {
-  return `  updated ${updatedAt} · refresh in ${remainingSec}s …  Ctrl-C to exit`;
+/** Format the watch-mode countdown suffix appended to the first header. */
+function refreshSuffix(remainingSec: number): string {
+  return `refresh in ${remainingSec}s`;
+}
+
+/** A rendered card plus the 0-based index of the refresh (countdown) line. */
+interface RenderedCard {
+  text: string;
+  /** 0-based row of the refresh countdown line, or null when there is none. */
+  refreshRow: number | null;
 }
 
 /**
- * Full redraw of one watch frame: clear screen, card body, blank line, and the
- * initial footer (counting down from `intervalSec`). `updatedAt` is captured
- * at query time so it stays fixed while only the countdown ticks.
+ * Render the card for a given provider selection. Centralises the
+ * combined-card formatting so watch and one-shot share one code path. In watch
+ * mode the refresh countdown is rendered on the separator row after the first
+ * section (its position is fixed whether or not a second section appears).
+ *
+ * `color` switches the bars to a heat-colored (green→red) 24-bit ANSI layout
+ * with the usage numbers overlaid inside. The CLI caller gates this on
+ * `stdout.isTTY && !plain`.
  */
-function renderFrame(plain: string, updatedAt: string, intervalSec: number): string {
-  return `${ANSI.clearScreen}${plain}\n\n${renderFooter(updatedAt, intervalSec)}`;
+function renderCard(
+  combined: Parameters<typeof formatCombinedCardPlain>[0],
+  provider: Provider,
+  detail: boolean,
+  color: boolean,
+  refresh?: string,
+): RenderedCard {
+  const text = formatCombinedCardPlain(combined, {
+    provider,
+    glm: { detail },
+    goWindows: defaultGoWindows(provider),
+    color,
+    refreshSuffix: refresh,
+  });
+  // The refresh line is the one carrying the countdown text. Without a refresh
+  // suffix there is no such line. When present it sits right after the first
+  // section, so we can find it by matching the suffix.
+  let refreshRow: number | null = null;
+  if (refresh) {
+    const lines = text.split("\n");
+    const idx = lines.findIndex((l) => l.includes(refresh));
+    refreshRow = idx >= 0 ? idx : null;
+  }
+  return { text, refreshRow };
 }
 
 /**
- * Run the watch loop until the process is interrupted. Each tick clears the
- * cache (so the displayed value is fresh, not a stale cache hit), queries, and
- * redraws. Between ticks a per-second countdown rewrites only the footer line
- * so the card body doesn't flicker. Errors from queryQuota are shown in-frame
- * and retried on the next tick rather than crashing the monitor (queryQuota
- * itself never throws — it degrades to `unavailable` — so this is defence in
- * depth).
+ * Full redraw of one watch frame: clear screen, then the card (with the
+ * refresh countdown on the separator row after the first section).
  */
-async function runWatch(intervalMs: number, detail: boolean): Promise<void> {
+function renderFrame(text: string): string {
+  return `${ANSI.clearScreen}${text}`;
+}
+
+/**
+ * Run the watch loop until the process is interrupted. Each tick clears both
+ * caches (so the displayed values are fresh, not stale cache hits), queries,
+ * and redraws. Between ticks a per-second countdown rewrites only the footer
+ * line so the card body doesn't flicker. The combined query never throws —
+ * each provider degrades internally — so this loop is robust.
+ */
+async function runWatch(
+  intervalMs: number,
+  provider: Provider,
+  detail: boolean,
+  color: boolean,
+): Promise<void> {
   const intervalSec = Math.round(intervalMs / 1000);
   const controller = new AbortController();
   const restore = (): void => {
@@ -203,19 +296,26 @@ async function runWatch(intervalMs: number, detail: boolean): Promise<void> {
   process.stdout.write(ANSI.hideCursor);
   try {
     while (!controller.signal.aborted) {
-      clearCache(); // bypass cache — always show the live value
-      const result = await queryQuota();
-      const updatedAt = timestamp();
-      // Full redraw of the whole frame (card + footer counting down from max).
-      process.stdout.write(
-        renderFrame(formatQuotaPlain(result, { detail }), updatedAt, intervalSec),
-      );
-      // Countdown: each second rewrite only the footer line, leaving the card
-      // untouched. \r returns to column 0; \x1B[2K clears the line.
+      clearAllCaches(); // bypass caches — always show live values
+      const combined = await queryCombined(provider);
+      // Full redraw with the countdown starting at the interval max.
+      const first = renderCard(combined, provider, detail, color, refreshSuffix(intervalSec));
+      process.stdout.write(renderFrame(first.text));
+      // Per-second countdown: rewrite only the refresh row (the separator line
+      // after the first section), leaving the card body untouched. Its row is
+      // fixed for the lifetime of this `combined` result, so we re-render the
+      // card with the new countdown purely to extract the refreshed line text,
+      // then blast it to that row via cursor-position + clear-line.
       for (let remaining = intervalSec - 1; remaining > 0; remaining--) {
         await sleep(1000, controller.signal).catch(() => undefined);
         if (controller.signal.aborted) break;
-        process.stdout.write(`\r${ANSI.clearLine}${renderFooter(updatedAt, remaining)}`);
+        const next = renderCard(combined, provider, detail, color, refreshSuffix(remaining));
+        if (first.refreshRow !== null && next.refreshRow !== null) {
+          const row = first.refreshRow + 1; // ANSI rows are 1-based
+          const line = next.text.split("\n")[next.refreshRow] ?? "";
+          // Move to (row, col 1), clear the line, write the refreshed countdown.
+          process.stdout.write(`\x1B[${row};1H${ANSI.clearLine}${line}`);
+        }
       }
     }
   } finally {
@@ -224,14 +324,31 @@ async function runWatch(intervalMs: number, detail: boolean): Promise<void> {
   }
 }
 
-/** Print the card once and exit. Non-success → stderr + exit 1. */
-async function runOnce(detail: boolean): Promise<void> {
-  const result = await queryQuota();
-  if (result.kind !== "success") {
-    process.stderr.write(formatQuotaPlain(result, { detail }) + "\n");
+/**
+ * Print the card once and exit. A fully-unavailable result (no provider could
+ * produce data) → stderr + exit 1, so scripts can detect failure. A partial
+ * result (at least one provider succeeded or is merely not_configured) goes
+ * to stdout with exit 0.
+ */
+async function runOnce(provider: Provider, detail: boolean, color: boolean): Promise<void> {
+  const combined = await queryCombined(provider);
+  const out = renderCard(combined, provider, detail, color).text;
+
+  // Failure = every selected provider ended up unavailable (not merely
+  // not_configured, which is a deliberate "skip me" state).
+  const glmFailed = combined.glm.kind === "unavailable";
+  const goFailed = combined.go.kind === "unavailable";
+  const glmSelected = provider === "all" || provider === "glm";
+  const goSelected = provider === "all" || provider === "go";
+  const selectedFailed =
+    (glmSelected && glmFailed && (!goSelected || goFailed)) ||
+    (goSelected && goFailed && (!glmSelected || glmFailed));
+
+  if (selectedFailed) {
+    process.stderr.write(out + "\n");
     process.exit(1);
   }
-  process.stdout.write(formatQuotaPlain(result, { detail }) + "\n");
+  process.stdout.write(out + "\n");
 }
 
 async function main(): Promise<void> {
@@ -246,10 +363,17 @@ async function main(): Promise<void> {
     process.stderr.write(`zcode-quota: interval below 10s raised to 10s (cache TTL is 10s)\n`);
   }
 
+  // Color is on by default on a real terminal; turn it off when piped/
+  // redirected (isTTY is only `true` on a real TTY — Node leaves it
+  // `undefined` for pipes/files) or when the user asks for --plain. This
+  // matches the common CLI convention (ls, git, grep) and keeps raw escape
+  // codes out of captured output.
+  const color = process.stdout.isTTY === true && !opts.plain;
+
   if (opts.watch) {
-    await runWatch(opts.intervalMs, opts.detail);
+    await runWatch(opts.intervalMs, opts.provider, opts.detail, color);
   } else {
-    await runOnce(opts.detail);
+    await runOnce(opts.provider, opts.detail, color);
   }
 }
 

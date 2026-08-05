@@ -21,7 +21,7 @@ vi.mock("../src/backend/credentials.js", () => ({
 }));
 
 import { clearCache, getCached, setCached, setClock } from "../src/quota/cache.js";
-import { formatQuota, formatQuotaPlain, renderBar } from "../src/quota/format.js";
+import { formatQuota, formatQuotaPlain, renderBar, renderGlmSection } from "../src/quota/format.js";
 import { parseLimit, parseQuotaEnvelope } from "../src/quota/parse.js";
 import type { QuotaResult } from "../src/quota/types.js";
 import { resolveQuotaHost } from "../src/quota/client.js";
@@ -230,11 +230,14 @@ describe("formatQuota", () => {
     expect(lines[3]).toContain("5h");
     expect(lines[3]).toContain("5%");
     expect(lines[3]).not.toContain("resets");
-    expect(lines[3]).not.toMatch(/\(\d+\/\d+\)/);
-    // MCP line: percent + absolute counts + reset time.
+    expect(lines[3]).not.toMatch(/\/\d+/); // no (used/total) on counter-less items
+    // MCP line: percent + used counter + reset time (total omitted — it's a
+    // fixed allowance already conveyed by the percentage bar).
     expect(lines[4]).toContain("MCP");
     expect(lines[4]).toContain("24%");
-    expect(lines[4]).toContain("(237/1000)");
+    expect(lines[4]).toContain("237");
+    expect(lines[4]).not.toMatch(/\/\d+/);
+    expect(lines[4]).not.toContain("used");
     expect(lines[4]).not.toContain("resets");
     // Detail branches (now padded model codes).
     expect(lines[5]).toMatch(/├ search-prime\s+\d+/);
@@ -248,7 +251,9 @@ describe("formatQuota", () => {
       level: "pro",
       items: [{ key: "token_5h", label: "5h", usedPercent: 18, leftPercent: 82 }],
     });
-    expect(out).not.toMatch(/\(\d+\/\d+\)/);
+    // The only trailing annotation on a counter-less item is the reset time
+    // (MM-DD HH:MM) — no bare ` · N` used counter.
+    expect(out).not.toMatch(/ · \d+$/m);
   });
 
   it("renders auth_error / rate_limited / unavailable fallbacks", () => {
@@ -320,6 +325,145 @@ describe("formatQuotaPlain", () => {
     const unavailable = formatQuotaPlain({ kind: "unavailable" });
     expect(unavailable).toBe(formatQuota({ kind: "unavailable" }));
     expect(unavailable).not.toContain("```");
+  });
+});
+
+describe("renderGlmSection", () => {
+  it("returns header + body lines for a success result (no fence, no divider)", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        { key: "token_5h", label: "5h", usedPercent: 5, leftPercent: 95 },
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 24,
+          leftPercent: 76,
+          detail: [{ modelCode: "search-prime", usage: 169 }],
+        },
+      ],
+    };
+    const sec = renderGlmSection(result);
+    expect(sec.header).toBe("GLM Coding Plan · Pro");
+    expect(sec.body[0]).toContain("5h");
+    expect(sec.body.length).toBeGreaterThanOrEqual(2);
+    // Body must NOT include a fence or divider — those are formatQuota's job.
+    expect(sec.body.join("\n")).not.toContain("```");
+    expect(sec.body.join("\n")).not.toMatch(/^─+$/m);
+  });
+
+  it("returns the fallback message as the body for non-success kinds", () => {
+    expect(renderGlmSection({ kind: "auth_error" }).body[0]).toMatch(/auth expired/i);
+    expect(renderGlmSection({ kind: "unavailable" }).body[0]).toMatch(/unavailable/i);
+    expect(renderGlmSection({ kind: "rate_limited" }).body[0]).toMatch(/busy/i);
+  });
+
+  it("respects the detail flag (omits sub-lines when false)", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 24,
+          leftPercent: 76,
+          detail: [{ modelCode: "search-prime", usage: 169 }],
+        },
+      ],
+    };
+    expect(renderGlmSection(result, { detail: false }).body.join("\n")).not.toContain(
+      "search-prime",
+    );
+    expect(renderGlmSection(result, { detail: true }).body.join("\n")).toContain("search-prime");
+  });
+
+  describe("color mode (opts.color)", () => {
+    const RESULT: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "token_5h",
+          label: "5h",
+          usedPercent: 73,
+          leftPercent: 27,
+          nextResetTime: 1783436462284,
+        },
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 14,
+          leftPercent: 86,
+          usedCount: 237,
+          totalCount: 1000,
+          nextResetTime: 1784166659961,
+        },
+      ],
+    };
+    // ESC via charCode so regex avoid literal control chars (no-control-regex).
+    const ESC = String.fromCharCode(27);
+    const stripAnsi = (s: string): string => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+
+    it("emits 24-bit ANSI escapes on bar lines when color is true", () => {
+      const sec = renderGlmSection(RESULT, { color: true });
+      const body = sec.body.join("\n");
+      expect(body).toContain(`${ESC}[48;2;`); // bg color escape
+      expect(body).toContain(`${ESC}[38;2;`); // fg color escape
+      expect(body).toContain(`${ESC}[0m`); // reset
+    });
+
+    it("overlays used/total inside the MCP bar and drops it from the margin", () => {
+      const sec = renderGlmSection(RESULT, { color: true });
+      const mcpLine = sec.body.find((l) => l.includes("MCP"))!;
+      // The overlay characters are interleaved with ANSI escapes per cell, so
+      // strip escapes first to read the visible bar text.
+      const visible = stripAnsi(mcpLine);
+      // The used/total counter rides inside the colored bar.
+      expect(visible).toContain("237/1000");
+      // The right margin must not repeat the percent or the bare used counter.
+      expect(visible).not.toMatch(/\b14%/); // no right-margin percent
+      expect(visible).not.toMatch(/ · 237(?!\d)/); // no bare ` · 237` counter
+    });
+
+    it("overlays NN% inside the 5h bar (no counters) and keeps the reset time", () => {
+      const sec = renderGlmSection(RESULT, { color: true });
+      const fiveLine = sec.body.find((l) => l.includes("5h"))!;
+      const visible = stripAnsi(fiveLine);
+      expect(visible).toContain("73%");
+      expect(visible).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/); // reset stamp present
+      // Color mode renders the bar with ANSI bg on space cells, not █/░.
+      expect(visible).not.toContain("█");
+      expect(visible).not.toContain("░");
+    });
+
+    it("color=true leaves plain (default) output untouched", () => {
+      // Sanity: default renderGlmSection has no ANSI escapes.
+      const plain = renderGlmSection(RESULT).body.join("\n");
+      expect(plain).not.toContain(ESC);
+    });
+
+    it("color mode still renders detail sub-lines when detail is true", () => {
+      const sec = renderGlmSection(
+        {
+          kind: "success",
+          level: "pro",
+          items: [
+            {
+              key: "mcp",
+              label: "MCP",
+              usedPercent: 24,
+              leftPercent: 76,
+              detail: [{ modelCode: "search-prime", usage: 169 }],
+            },
+          ],
+        },
+        { color: true, detail: true },
+      );
+      expect(sec.body.join("\n")).toContain("search-prime");
+      expect(sec.body.join("\n")).toMatch(/[├└]/);
+    });
   });
 });
 
