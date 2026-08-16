@@ -14,7 +14,14 @@ import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { flattenTodos } from "../src/handlers/session.js";
+import {
+  buildConfigOptions,
+  formatModelValue,
+  loadAllModels,
+  orderThoughtVariants,
+} from "../src/config/options.js";
 import { CONFIG_META } from "../src/utils.js";
+import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
 
 /** Build a listener over a fake backend (no subprocess; we drive handleEvent). */
@@ -236,13 +243,60 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
   it("uses thought_level category, Thought Level name, lowercase option names", () => {
     expect(CONFIG_META.thought.category).toBe("thought_level");
     expect(CONFIG_META.thought.name).toBe("Thought Level");
+    // The static fallback matches the default coding-plan model's real
+    // vocabulary (runtime-verified); the live per-model list comes from the
+    // enabled provider's reasoning.variants instead of this constant.
     const names = CONFIG_META.thought.options.map((o) => o.name);
-    expect(names).toEqual(["max", "high", "nothink"]);
+    expect(names).toEqual(["low", "high", "max"]);
   });
 
   it("uses lowercase mode option names", () => {
     const names = CONFIG_META.mode.options.map((o) => o.name);
     expect(names).toEqual(["plan", "build", "edit", "yolo", "auto"]);
+  });
+});
+
+describe("Bug 6: thought option is discoverable and honest", () => {
+  it("advertises the spec category thought_level on the pending session", async () => {
+    // Regression: the category was a bare "thought", which is not one of the
+    // ACP spec's reserved SessionConfigOptionCategory names (mode/model/
+    // model_config/thought_level) — clients keying on the standard tokens
+    // (effort pickers in editors and orchestrators) could not find the
+    // reasoning selector at all.
+    const server = new ZcodeAcpServer();
+    const options = await buildConfigOptions(server, null);
+    const thought = options.find((o) => o.id === "thought");
+    expect(thought?.category).toBe("thought_level");
+    expect(thought?.options.length).toBeGreaterThan(0);
+  });
+
+  it("orders thought variants canonically and keeps unknown tokens last", () => {
+    expect(orderThoughtVariants(["high", "nothink", "low", "max"])).toEqual([
+      { value: "low", name: "low" },
+      { value: "high", name: "high" },
+      { value: "max", name: "max" },
+      { value: "nothink", name: "nothink" },
+    ]);
+    expect(orderThoughtVariants(["turbo", "low"])).toEqual([
+      { value: "low", name: "low" },
+      { value: "turbo", name: "turbo" },
+    ]);
+  });
+
+  it("advertises the enabled provider's leading model as the pending current value", async () => {
+    // Regression: the pending session hardcoded currentValue "GLM-5.2",
+    // which can disagree with the model the runtime actually starts with
+    // (the enabled provider's leading model). ACP clients skip a requested
+    // switch when it matches the advertised current value, so the stale
+    // fiction silently pinned the wrong model whenever the requested id
+    // happened to equal it (observed with Paseo's --model GLM-5.2).
+    const server = new ZcodeAcpServer();
+    const options = await buildConfigOptions(server, null);
+    const model = options.find((o) => o.id === "model");
+    const leading = loadAllModels()[0];
+    expect(model?.currentValue).toBe(formatModelValue(leading.providerId, leading.modelId));
+    // The advertised current value must also be selectable in the dropdown.
+    expect(model?.options.map((o) => o.value)).toContain(model?.currentValue);
   });
 });
 
