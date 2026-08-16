@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-16
+
 ### Added
 
 - Auto-compact (`src/config/auto-compact.ts`): when context usage exceeds the
@@ -20,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without running its signal handlers (Zed force-kill on reconnect, crash,
   OOM). Closes the orphan-zcode gap that `close()` cannot cover on SIGKILL.
 - Per-command `input.hint` on `available_commands_update`, so editors can
-  pre-fill the slash command input.
+  pre-fill the slash command input. Skills with an `argument-hint` frontmatter
+  are hinted too.
 - `server.lastMode` map recording the mode value advertised to the client,
   used by the new mode reconciliation.
 - `.node-version` pinning node 22 for fnm.
@@ -30,21 +33,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credentials are required. The registry CI rejects empty `authMethods`, so
   this is required for submission. Submission assets live under
   `registry/zcode-acp-server/` (`agent.json` + `icon.svg`).
+- ZCode extension resources exposed to the editor: skills, init/plugin
+  commands, and friendly errors for TUI-only commands (#18).
+- Sub-agent and background-task events are synced to the ACP client;
+  background Bash tasks render as badge-labelled launch cards (#21, #23).
+- TODO/plan updates are pushed on tool completion instead of waiting for the
+  turn to end (#20).
+- Drag-and-drop attachments (text files and images) are forwarded to the
+  backend as `session/send` attachments, including binary drops (#24, #26,
+  #39).
+- Custom third-party model providers: the provider registry from
+  `~/.zcode/v2/config.json` is pushed to the backend, and model switching
+  routes per-provider credentials (#27).
+- Elicitation forms revamped for free-text input (#30).
+- `/quota` slash command plus the standalone `zcode-quota` CLI (watch mode,
+  heat-colored progress bars) for GLM Coding Plan usage (#10, #13, #40).
 
 ### Fixed
 
 - `/mode` and `/thought` slash commands now emit `current_mode_update` and
   `config_option_update`. Previously they switched the backend mode but never
   notified the editor UI, because slash commands return `end_turn` and bypass
-  the turn-completion reconciliation.
-- Prompt-lock leak after stop. `session/stop` is fire-and-forget and ZCode has
-  a startup delay: when stop arrived before the turn truly held the lock the
-  backend ignored it, the turn ran on, and the next `session/send` failed with
-  "A prompt is already running". `ensureTurnStopped` now probes
-  `session/goal show` until the lock is confirmed released (expectLock strategy
-  with an 8s grace window). The `session/send` error path is also covered.
+  the turn-completion reconciliation. `/model` UI state syncs after a switch
+  too, and `/goal` routes through the extensions path (#36).
 - In-turn `EnterPlanMode`/`ExitPlanMode` now trigger mode reconciliation at
-  turn completion (`emitModeIfChanged`), since they bypass `session/setMode`.
+  turn completion (`emitModeIfChanged`), since they bypass `session/setMode`
+  (#31, #32).
+- `session/new` no longer hangs ~15s against ZCode CLI ≥ 0.16: the bridge
+  auto-replies to the new `session/requestRuntimePreferences` request during
+  `session/create` (#38, closes #41). ACP session creation is also lazy —
+  `session/new` returns immediately and the backend session materialises on
+  first use — and `session/resume` retries absorb the backend cold-start
+  window (#28, #29, #38).
+- Cancel-then-send hang: after a stop (or a new prompt preempting one), the
+  next `session/send` retries while the backend still reports "prompt is
+  running", using the backend's prompt lock as the single readiness signal,
+  instead of failing immediately or blocking on bridge-side guesses (#48).
+- Cross-turn event contamination: a new prompt no longer consumes the previous
+  turn's leftover events (including its `turn.completed`); events observed
+  before the new turn's own `turn.started` are gated, and content produced
+  while no listener was attached is replayed at turn completion (deduplicated
+  per backend message id) (#48).
+- Server-request abort storm: interaction racers now tear down their
+  timers/listeners once settled, and requests arriving after a cancel are
+  declined inline instead of looping forward→abort→re-emit (#48).
+- Stop semantics: events the backend produces after a stop that didn't take
+  effect are still displayed (the backend is the source of truth within a
+  session) rather than silently drained (#37, #48).
+- Thought-level vocabulary root cause: the provider registry and the
+  `runtimeModel` overlay carry full model definitions (reasoning variants →
+  `levels`/`defaultLevel`, context window, label), restoring the real
+  max/high/low dropdown on materialised sessions and across resume/switch —
+  previously the backend fell back to the apiFormat's 2-state
+  enabled/disabled (#48). Pending sessions derive their current model and
+  thought level from the enabled provider (#47).
+- The spec-spelled `session/set_mode` request is routed alongside the
+  camelCase form (#46).
+- Client-provided `mcpServers` (ACP `session/new`/resume) are forwarded to the
+  backend's session create/resume (#43).
+- Server→client requests (permission, elicitation) are routed by sessionId,
+  preventing cross-session popup leaks (#12); popups abort cleanly on turn
+  cancel or timeout and wait for the user instead of auto-declining (#22,
+  #35).
+- Transient `turn.failed` responses are retried and degrade gracefully (#33).
+- Bash terminal output sends only the stdout delta, preventing replay (#14,
+  #15); tasks-index rows and the 3.3.0 protocol stay in sync with the ZCode
+  App, and slash-command pushes harden against transient failures (#11, #25).
 
 ### Changed
 
@@ -54,6 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local environment (corepack/fnm).
 - Removed the empty `agentCapabilities.auth: {}` from the `initialize`
   response; the auth story is now carried by the new `authMethods` entry.
+- Default model fallbacks updated to GLM-5.3 and extracted into shared
+  constants; new prompts preempt an in-flight turn without waiting for the old
+  turn's loop to exit.
 
 ## [0.1.0] - 2026-07-04
 
