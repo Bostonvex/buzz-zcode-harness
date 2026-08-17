@@ -17,13 +17,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
-import type {
-  ZcodeCreateResult,
-  ZcodeListResult,
-  ZcodeMessage,
-  ZcodeMessagesResult,
-  ZcodeSnapshot,
-} from "../backend/types.js";
+import type { ZcodeCreateResult, ZcodeListResult, ZcodeSnapshot } from "../backend/types.js";
 import { buildModes, buildConfigOptions } from "../config/options.js";
 import { emitInitialUsage } from "../config/model-cache.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
@@ -45,7 +39,8 @@ import type { InternalEvent } from "../translators/index.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
-import { sendSessionUpdate, sendTextChunk } from "./io.js";
+import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
+import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
 import { handleServerRequests } from "./server-requests.js";
 
 /** Workspace descriptor used in session create/resume calls. */
@@ -103,6 +98,9 @@ export async function newSession(
   // backend session materializes; never shown in session/list.
   const acpSid = randomUUID();
   server.pendingSessions.set(acpSid, { cwd, mcpServers: params.mcpServers });
+  // Persists past materialization (pendingSessions is cleared on first use) so
+  // the remote discovery payload can still label the workspace.
+  server.sessionCwds.set(acpSid, cwd);
   // Durable alias so the placeholder survives a bridge restart and session/
   // resume can still resolve it (best-effort; failures are swallowed inside
   // the store).
@@ -147,6 +145,7 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     if (record) {
       pending = { cwd: record.cwd };
       server.pendingSessions.set(acpSid, pending);
+      server.sessionCwds.set(acpSid, record.cwd);
     }
   }
   if (!pending) throw new Error(`session ${acpSid} not found`);
@@ -242,6 +241,38 @@ export async function listSessions(
 }
 
 /**
+ * Adopt the backend's stored title for a loaded/resumed session.
+ *
+ * The prompt loop's auto-title only fires for freshly created sessions
+ * (`titleEligibleSessions`), so a session resumed across a bridge restart
+ * would otherwise appear title-less in the hub's discovery API — remote
+ * clients have no editor-side session storage to fall back on. The backend's
+ * session/list is the only title source for sessions born in a previous
+ * bridge lifetime. Best-effort: failures log and leave the session untitled.
+ */
+async function adoptStoredTitle(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  if (server.sessionTitles.has(acpSid)) return;
+  try {
+    const backend = server.ensureBackend();
+    const resp = await backend.request(server.nextId(), "session/list", {}, 15000);
+    if (resp.error) return;
+    const result = (resp.result ?? {}) as ZcodeListResult;
+    const hit = (result.sessions ?? []).find((s) => s.sessionId === zcodeSid);
+    if (hit?.title) {
+      server.sessionTitles.set(acpSid, hit.title);
+      server.touchSessionSummary(acpSid, hit.title);
+      log(`adopted stored title for ${acpSid.slice(0, 8)}: ${hit.title}`);
+    }
+  } catch (e) {
+    log(`stored title lookup failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
  * Resolve the backend session id for `session/resume` / `session/load`.
  *
  * A `session/new` placeholder has no backend counterpart until first use, yet
@@ -321,6 +352,7 @@ export async function resumeSession(
   server.registerSession(acpSid, zcodeSid);
   log(`session/resume -> ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
+  await adoptStoredTitle(server, acpSid, zcodeSid);
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
@@ -365,59 +397,19 @@ export async function loadSession(
   server.registerSession(acpSid, zcodeSid);
   log(`session/load → ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
+  await adoptStoredTitle(server, acpSid, zcodeSid);
 
   const messages = await fetchMessages(server, zcodeSid);
-  let replayed = 0;
-  for (const m of messages) {
-    const info = m.info ?? {};
-    const role = info.role;
-    const mid = info.id ?? `hist_${randomUUID().slice(0, 12)}`;
-    for (const p of m.parts ?? []) {
-      if (!p || typeof p !== "object") continue;
-      const ptype = (p as { type?: string }).type;
-      if (ptype === "text") {
-        const text = (p as { text?: string }).text ?? "";
-        if (!text) continue;
-        const sessionUpdate = role === "user" ? "user_message_chunk" : "agent_message_chunk";
-        await sendSessionUpdate(cx, acpSid, {
-          sessionUpdate,
-          content: { type: "text", text },
-          messageId: mid,
-        });
-      } else if (ptype === "reasoning") {
-        const rp = p as { text?: string; content?: string };
-        const text = rp.text ?? rp.content ?? "";
-        if (text) {
-          await sendSessionUpdate(cx, acpSid, {
-            sessionUpdate: "agent_thought_chunk",
-            content: { type: "text", text },
-            messageId: `thought_${mid}`,
-          });
-        }
-      } else if (ptype === "tool") {
-        const tp = p as {
-          id?: string;
-          tool?: string;
-          title?: string;
-          status?: string;
-        };
-        const title = tp.title ?? tp.tool ?? "tool call";
-        const histToolName = tp.tool ?? "";
-        const update: acp.SessionUpdate = {
-          sessionUpdate: "tool_call",
-          toolCallId: tp.id ?? `histtool_${randomUUID().slice(0, 8)}`,
-          title,
-          kind: "other",
-          status: (tp.status as acp.ToolCallStatus) ?? "completed",
-          ...(histToolName ? { _meta: { claudeCode: { toolName: histToolName } } } : {}),
-        };
-        await sendSessionUpdate(cx, acpSid, update);
-      }
-      // patch / step-start / other: skipped (history replay focuses on text + tool summary)
-    }
-    replayed += 1;
-  }
-  log(`session/load: replayed ${replayed} messages`);
+  // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
+  // N messages aligned to turn boundaries — the full replay stays the default
+  // for editors that send no `_meta` (Zed path unchanged).
+  const limit = readTailLimit(params);
+  const slice = limit === null ? fullSlice(messages) : sliceTail(messages, limit);
+  await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
+  log(
+    `session/load: replayed ${slice.meta.replayedMessages} messages` +
+      `${limit === null ? "" : ` (tail limit ${limit}, total ${slice.meta.totalMessages})`}`,
+  );
 
   // Replay the existing todo list as an initial plan so a loaded session shows
   // its todos immediately (filter to PlanUpdate only — text/tools were already
@@ -440,10 +432,13 @@ export async function loadSession(
 
   const modes = await buildModes(server, zcodeSid);
   server.lastMode.set(acpSid, modes.currentModeId);
-  return {
+  const result = {
     modes,
     configOptions: await buildConfigOptions(server, zcodeSid),
+    // Additive replay metadata — the anchor for load_earlier pagination.
+    replayMeta: slice.meta,
   };
+  return result as acp.LoadSessionResponse;
 }
 
 /** `session/prompt` → subscribe-before-send, run the event-driven turn loop. */
@@ -467,10 +462,17 @@ export async function prompt(
   const zcodeSid = await ensureRealSession(server, params.sessionId);
 
   // Slash-command interception: dispatches directly to ZCode methods and
-  // returns end_turn without entering the turn loop. Unknown /x falls through.
-  const { handleSlashCommand } = await import("./slash.js");
+  // returns end_turn without entering the turn loop. Known passthrough
+  // commands and unknown /x both return null for the normal turn loop.
+  const { handleSlashCommand, neutralizeSlashText } = await import("./slash.js");
   const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
   if (intercepted) return intercepted;
+
+  // Wire text for the backend: unknown `/x` prompts (not advertised commands)
+  // are neutralized so the backend's command resolver never sees them — an
+  // unresolvable name can hard-fail the turn. Known commands pass through
+  // unchanged. The title/auto-compact paths below keep using the raw `text`.
+  const sendText = neutralizeSlashText(text);
 
   // Register self + preempt others under a per-session lock. The lock
   // serializes the critical section so that two concurrent prompts (B, C) for
@@ -573,8 +575,8 @@ export async function prompt(
       const SEND_RETRY_TIMEOUT_MS = 30_000;
       const sendParams =
         attachments.length > 0
-          ? { sessionId: zcodeSid, content: text, attachments }
-          : { sessionId: zcodeSid, content: text };
+          ? { sessionId: zcodeSid, content: sendText, attachments }
+          : { sessionId: zcodeSid, content: sendText };
       const sendT0 = Date.now();
       let sendAttempt = 0;
       while (true) {
@@ -658,6 +660,7 @@ export async function prompt(
               .find((l) => l.length > 0)
               ?.slice(0, 80) ?? text.slice(0, 80);
           server.sessionTitles.set(params.sessionId, title);
+          server.touchSessionSummary(params.sessionId, title);
           const { updateSessionTitle } = await import("../tasks-index.js");
           void updateSessionTitle(zcodeSid, title, text);
           await sendSessionUpdate(cx, params.sessionId, {
@@ -713,6 +716,9 @@ export async function prompt(
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
     server.pendingTurns.delete(requestId);
+    // Turn end = session activity — refresh the discovery summary timestamp
+    // regardless of outcome (end_turn, cancelled, retries exhausted).
+    server.touchSessionSummary(params.sessionId);
   }
 }
 
@@ -1083,20 +1089,6 @@ async function resumeBackendSession(
     );
     await sleep(1000);
   }
-}
-
-/** Fetch session/messages from zcode. */
-async function fetchMessages(server: ZcodeAcpServer, zcodeSid: string): Promise<ZcodeMessage[]> {
-  const backend = server.ensureBackend();
-  const resp = await backend.request(
-    server.nextId(),
-    "session/messages",
-    { sessionId: zcodeSid },
-    8000,
-  );
-  if (resp.error) return [];
-  const result = (resp.result ?? {}) as ZcodeMessagesResult;
-  return result.messages ?? [];
 }
 
 /** Get or create the session-level ProjectionDiffer (persists across turns). */
