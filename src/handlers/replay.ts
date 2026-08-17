@@ -187,6 +187,33 @@ export function readTailLimit(params: acp.LoadSessionRequest): number | null {
   return clampLimit(raw);
 }
 
+/**
+ * Drop duplicate entries the backend can return for the same message id
+ * (observed in live session/messages payloads: the same id appears at
+ * multiple, non-adjacent positions with identical content). Replaying every
+ * copy makes clients render the same paragraph once per copy. Each id is
+ * kept at its first (original) position with its latest (most recent)
+ * content; id-less entries pass through untouched.
+ */
+function dedupeMessages(messages: ZcodeMessage[]): ZcodeMessage[] {
+  const firstIndex = new Map<string, number>();
+  const latest = new Map<string, ZcodeMessage>();
+  messages.forEach((m, i) => {
+    const id = m.info?.id;
+    if (!id) return;
+    if (!firstIndex.has(id)) firstIndex.set(id, i);
+    latest.set(id, m);
+  });
+  if (firstIndex.size === messages.length) return messages;
+  return messages
+    .map((m, i) => {
+      const id = m.info?.id;
+      if (!id) return m;
+      return firstIndex.get(id) === i ? (latest.get(id) ?? m) : null;
+    })
+    .filter((m): m is ZcodeMessage => m !== null);
+}
+
 /** Fetch session/messages from zcode (the bridge's only history source). */
 export async function fetchMessages(
   server: ZcodeAcpServer,
@@ -206,17 +233,31 @@ export async function fetchMessages(
     return [];
   }
   const result = (resp.result ?? {}) as ZcodeMessagesResult;
-  return result.messages ?? [];
+  return dedupeMessages(result.messages ?? []);
 }
 
 /**
- * Strip harness-injected reminder blocks from user text. The agent runtime
- * appends `<system-reminder>…</system-reminder>` blocks (TodoWrite nudges,
- * context handoffs) to user turns as context plumbing — they are not user
- * speech, and replaying them verbatim makes clients render them as user input.
+ * Strip harness-injected reminder plumbing from user text. The agent runtime
+ * appends TodoWrite/Read usage nudges (with an optional todo-list dump) and
+ * `<system-reminder>` blocks to user turns — they are not user speech, and
+ * replaying them verbatim makes clients render them as user input.
+ *
+ * The nudges arrive in stored history WITHOUT tags (verified against live
+ * session/messages payloads), so they are matched by their stable shape: a
+ * fixed opening signature, a fixed closing sentence, and — when present — a
+ * bracket-wrapped todo dump. Real user text before or after the block
+ * survives; user messages that consist only of plumbing are dropped by the
+ * caller's empty-check.
  */
 function stripSystemReminders(text: string): string {
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+    .replace(
+      /The (?:TodoWrite|Read) tool hasn't been used recently\.[\s\S]*?This is just a gentle reminder - ignore if not applicable\./g,
+      "",
+    )
+    .replace(/Here (?:are|is)[^\n]*todo list:\s*\n\s*\n\[[\s\S]*?\](?=\n|$)/g, "")
+    .trim();
 }
 
 /**

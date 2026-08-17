@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-17
+
+### Fixed
+
+- Replay now also strips harness tool-usage reminders that the backend stores
+  WITHOUT `<system-reminder>` tags (TodoWrite/Read nudges followed by the
+  todo-list dump) — verified against live `session/messages` payloads, they
+  previously replayed verbatim and rendered as user input. Matching anchors on
+  the nudge's stable opening signature and closing sentence, so real user text
+  before or after the block survives.
+- Replay now deduplicates history entries that share a message id — the
+  backend can return the same message at multiple non-adjacent positions
+  (observed in a live payload: 21 of 42 messages were duplicates), and every
+  copy was replayed, rendering identical paragraphs twice. Each id is kept
+  once, at its original position with its latest content.
+
 ## [0.3.1] - 2026-08-17
 
 ### Fixed
