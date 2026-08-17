@@ -12,6 +12,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
+import type { ZcodeMessage } from "../src/backend/types.js";
 import {
   ensureRealSession,
   loadSession,
@@ -56,11 +57,14 @@ beforeEach(() => {
 
 /**
  * Fake backend: answers session/create (counting creates), session/resume,
- * session/read (empty projection/settings), session/messages (empty), the
- * provider-registry push, and session/list (from `listed`, for title
- * adoption); errors on everything else.
+ * session/read (empty projection/settings), session/messages (from `messages`,
+ * empty by default), the provider-registry push, and session/list (from
+ * `listed`, for title adoption); errors on everything else.
  */
-function fakeBackend(listed: Array<{ sessionId: string; title?: string }> = []): ZcodeBackend & {
+function fakeBackend(
+  listed: Array<{ sessionId: string; title?: string }> = [],
+  messages: ZcodeMessage[] = [],
+): ZcodeBackend & {
   calls: Array<{ method: string; params: unknown }>;
 } {
   const calls: Array<{ method: string; params: unknown }> = [];
@@ -86,7 +90,7 @@ function fakeBackend(listed: Array<{ sessionId: string; title?: string }> = []):
         case "session/read":
           return { id, result: { projection: { contextUsed: 0 }, settings: {} } };
         case "session/messages":
-          return { id, result: { messages: [] } };
+          return { id, result: { messages } };
         default:
           return { id, error: { message: `unhandled ${method}` } };
       }
@@ -438,5 +442,90 @@ describe("stored title adoption on load/resume", () => {
     );
 
     expect(server.sessionSummaries.get("sess_real")?.title).toBe("Historical title");
+  });
+});
+
+describe("discovery activity gating", () => {
+  it("a never-used placeholder resumed by an editor restart stays hidden", async () => {
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend } = fakeBackend();
+    server.backend = backend;
+
+    // Editor restart → session/resume of the stored placeholder materializes
+    // an empty backend session; no turn ever runs.
+    await resumeSession(
+      server,
+      { sessionId: resp.sessionId, cwd: "/tmp/ws" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    const summary = server.sessionSummaries.get(resp.sessionId);
+    expect(summary).toBeDefined();
+    expect(summary?.hasActivity).toBeFalsy();
+  });
+
+  it("loadSession with history marks the session discoverable", async () => {
+    const server = new ZcodeAcpServer();
+    const history: ZcodeMessage[] = [
+      { info: { id: "m1", role: "user" }, parts: [{ type: "text", text: "hello" }] },
+    ];
+    const { backend } = fakeBackend([], history);
+    server.backend = backend;
+
+    await loadSession(
+      server,
+      { sessionId: "sess_hist" } as acp.LoadSessionRequest,
+      { notify: async () => {} } as unknown as acp.AgentContext,
+    );
+
+    expect(server.sessionSummaries.get("sess_hist")?.hasActivity).toBe(true);
+  });
+});
+
+describe("backend-loaded session tracking", () => {
+  const stubCx = { notify: async () => {} } as unknown as acp.AgentContext;
+
+  it("session/load re-issues the resume RPC for a mapping that was never loaded", async () => {
+    const server = new ZcodeAcpServer();
+    // The poison case: a mapping re-registered from the durable store (or
+    // left by a failed resume) without the session ever being loaded into
+    // this backend subprocess.
+    server.registerSession("s-old", "sess_old");
+    const history: ZcodeMessage[] = [
+      { info: { id: "m1", role: "user" }, parts: [{ type: "text", text: "old turn" }] },
+    ];
+    const { backend, calls } = fakeBackend([], history);
+    server.backend = backend;
+
+    await loadSession(server, { sessionId: "s-old" } as acp.LoadSessionRequest, stubCx);
+
+    const resume = calls.find((c) => c.method === "session/resume");
+    expect(resume?.params).toMatchObject({ sessionId: "sess_old" });
+    expect(server.backendLoadedSessions.has("s-old")).toBe(true);
+  });
+
+  it("session/load skips the resume RPC once the session is verified loaded", async () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s-live", "sess_live");
+    server.backendLoadedSessions.add("s-live");
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    await loadSession(server, { sessionId: "s-live" } as acp.LoadSessionRequest, stubCx);
+
+    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
+    expect(calls.some((c) => c.method === "session/messages")).toBe(true);
+  });
+
+  it("materializing a placeholder marks it backend-loaded", async () => {
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend } = fakeBackend();
+    server.backend = backend;
+
+    await ensureRealSession(server, resp.sessionId);
+
+    expect(server.backendLoadedSessions.has(resp.sessionId)).toBe(true);
   });
 });

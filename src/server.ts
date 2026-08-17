@@ -109,14 +109,31 @@ export class ZcodeAcpServer {
   readonly clients = new ClientRegistry();
   /**
    * Lightweight session summaries for the remote hub's discovery API
-   * (acp_sid → { title, updatedAt }). In-memory only — the hub holds no
-   * business state and the bridge dies with its editor, so persistence would
-   * buy nothing. Maintained by `touchSessionSummary` at session registration,
-   * title set, and turn completion.
+   * (acp_sid → { title, updatedAt, hasActivity }). In-memory only — the hub
+   * holds no business state and the bridge dies with its editor, so persistence
+   * would buy nothing. Maintained by `touchSessionSummary` at session
+   * registration, title set, and turn completion. `hasActivity` gates the
+   * discovery payload: an editor restart auto-resumes its stored placeholder,
+   * materializing an empty backend session — never-used sessions stay invisible
+   * to remote clients until first real use.
    */
-  readonly sessionSummaries = new Map<string, { title?: string; updatedAt: number }>();
+  readonly sessionSummaries = new Map<
+    string,
+    { title?: string; updatedAt: number; hasActivity?: boolean }
+  >();
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
+  /**
+   * Sessions verified as loaded in the CURRENT backend subprocess — populated
+   * only after a successful session/create or session/resume RPC. A bare
+   * `registerSession` mapping does NOT qualify: the backend answers
+   * `session/messages` only for sessions it has loaded, so `session/load`
+   * must not skip the resume RPC for a mapping that was never loaded (e.g.
+   * re-registered from the durable store by an early ensureRealSession
+   * caller, or left behind by a failed resume) — the replay would silently
+   * come back empty.
+   */
+  readonly backendLoadedSessions = new Set<string>();
   /**
    * Sessions eligible for auto-title on first end_turn. Only `session/new`
    * populates this — resumed/loaded sessions already carry a title, so their
@@ -196,6 +213,23 @@ export class ZcodeAcpServer {
     this.sessionSummaries.set(acpSid, {
       title: title ?? existing?.title,
       updatedAt: Date.now(),
+      // A title only exists once the session produced content (auto-title on
+      // first end_turn, or a stored title adopted on resume/load).
+      hasActivity: existing?.hasActivity || title !== undefined,
+    });
+  }
+
+  /**
+   * Mark a session as having real interaction (a prompt turn ran, or history
+   * was replayed on load). Gates the hub discovery payload — never-used
+   * sessions stay invisible to remote clients until first use.
+   */
+  markSessionActive(acpSid: string): void {
+    const existing = this.sessionSummaries.get(acpSid);
+    this.sessionSummaries.set(acpSid, {
+      title: existing?.title,
+      updatedAt: Date.now(),
+      hasActivity: true,
     });
   }
 
