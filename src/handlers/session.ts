@@ -447,11 +447,15 @@ export async function loadSession(
 
   const modes = await buildModes(server, zcodeSid);
   server.lastMode.set(acpSid, modes.currentModeId);
+  // A turn from a prior client may still be in flight (the bridge runs it to
+  // completion regardless of who prompted); flag it so re-attaching clients
+  // restore their running state. Editor-initiated turns land here too.
+  const turnActive = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
   const result = {
     modes,
     configOptions: await buildConfigOptions(server, zcodeSid),
     // Additive replay metadata — the anchor for load_earlier pagination.
-    replayMeta: slice.meta,
+    replayMeta: { ...slice.meta, turnActive },
   };
   return result as acp.LoadSessionResponse;
 }
@@ -509,6 +513,15 @@ export async function prompt(
     server.pendingTurns.set(requestId, turn);
     preempted = preemptInFlightTurn(server, zcodeSid, requestId);
   });
+  // Out-of-band running indicator: clients that did not send this prompt
+  // (re-attached mobile, second editor) learn the turn started here — the
+  // session/load replayMeta only snapshots attach time. Best-effort: a dead
+  // client must not fail the turn.
+  const emitTurnState = (running: boolean): Promise<void> =>
+    cx
+      .notify("$/zcode/turnState", { sessionId: params.sessionId, running })
+      .catch((e) => log(`turnState notify failed: ${e instanceof Error ? e.message : String(e)}`));
+  await emitTurnState(true);
 
   const listener = new EventStreamListener(backend, zcodeSid);
   const monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
@@ -529,6 +542,7 @@ export async function prompt(
     snapshot = await listener.subscribe(() => server.nextId());
   } catch (e) {
     server.pendingTurns.delete(requestId);
+    await emitTurnState(false);
     throw e;
   }
   // subscribe() requests includeSnapshot:false (it only needs the eventSeq
@@ -735,6 +749,10 @@ export async function prompt(
     // session discoverable regardless of outcome (end_turn, cancelled, retries
     // exhausted).
     server.markSessionActive(params.sessionId);
+    // Report "running" only while no other turn for the session took over
+    // (preempt): the preempting turn's own running:true must survive.
+    const stillBusy = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
+    await emitTurnState(stillBusy);
   }
 }
 

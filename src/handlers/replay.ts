@@ -33,6 +33,13 @@ export interface ReplayMeta {
   replayedTurns: number;
   totalMessages: number;
   totalTurns: number;
+  /**
+   * True when a turn for this session is still in flight on the bridge.
+   * Re-attaching clients (mobile reconnect, second editor) restore their
+   * "running" UI from this; they did not send the prompt, so only this flag
+   * and the `$/zcode/turnState` notifications tell them a turn is active.
+   */
+  turnActive?: boolean;
 }
 
 export interface ReplaySlice {

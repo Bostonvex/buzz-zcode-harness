@@ -448,3 +448,42 @@ describe("session/load_earlier", () => {
     ).rejects.toThrow("before");
   });
 });
+
+describe("replayMeta.turnActive", () => {
+  it("flags an in-flight turn for the loaded session", async () => {
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(hist());
+    const { cx } = collectCx();
+    await loadSession(server, loadParams(), cx);
+    const zcodeSid = server.resolveSid("sess_tail");
+    expect(zcodeSid).toBeDefined();
+    server.pendingTurns.set(999, { zcodeSid: zcodeSid!, cancelled: false });
+
+    const result = await loadSession(server, loadParams(), cx);
+    expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(true);
+  });
+
+  it("reports false when no turn is in flight", async () => {
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(hist());
+    const { cx } = collectCx();
+
+    const result = await loadSession(server, loadParams(), cx);
+    expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(
+      false,
+    );
+  });
+
+  it("ignores turns belonging to other sessions", async () => {
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(hist());
+    const { cx } = collectCx();
+    await loadSession(server, loadParams(), cx);
+    server.pendingTurns.set(999, { zcodeSid: "some-other-session", cancelled: false });
+
+    const result = await loadSession(server, loadParams(), cx);
+    expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(
+      false,
+    );
+  });
+});
