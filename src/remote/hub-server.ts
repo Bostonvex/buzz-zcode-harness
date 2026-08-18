@@ -18,7 +18,13 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {
+  createServer,
+  get as httpGet,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import net from "node:net";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -240,6 +246,26 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           }
         }
       }
+      // Cross-instance session dedupe: every bridge of a workspace lists the
+      // same shared backend session store, so one conversation can appear on
+      // several instances. Keep exactly one copy — the freshest session
+      // updatedAt (the bridge actually driving the conversation wins; a
+      // leaked older bridge's stale copy loses), tie-broken by the
+      // newest-started instance — so clients see each conversation once and
+      // attach where it is live.
+      const winners = new Map<string, { updatedAt: number; instance: InstanceEntry }>();
+      for (const entry of instances.values()) {
+        for (const s of entry.sessions) {
+          const prev = winners.get(s.sessionId);
+          if (
+            !prev ||
+            s.updatedAt > prev.updatedAt ||
+            (s.updatedAt === prev.updatedAt && entry.startedAt > prev.instance.startedAt)
+          ) {
+            winners.set(s.sessionId, { updatedAt: s.updatedAt, instance: entry });
+          }
+        }
+      }
       const list = Array.from(instances.values())
         .sort((a, b) => a.startedAt - b.startedAt)
         .map((e) => ({
@@ -248,10 +274,47 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           pid: e.pid,
           startedAt: e.startedAt,
           workspace: e.workspace,
-          sessions: e.sessions,
+          sessions: e.sessions.filter((s) => winners.get(s.sessionId)?.instance === e),
         }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(list));
+      return;
+    }
+    // /api/instances/{id}/fs/... — byte-level proxy to the instance's
+    // loopback file endpoint (ADR-0004). The hub routes by instance id only;
+    // sessionId, path semantics, and scope checks stay in the bridge.
+    const fsMatch = url.pathname.match(/^\/api\/instances\/([^/]+)(\/fs\/.*)$/);
+    if (fsMatch && (req.method === "GET" || req.method === "HEAD")) {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const entry = instances.get(fsMatch[1]!);
+      if (!entry) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("unknown instance");
+        return;
+      }
+      const upstream = httpGet(
+        { host: "127.0.0.1", port: entry.port, path: fsMatch[2]! + url.search },
+        (up) => {
+          // Strip hop-by-hop headers; Node re-frames the proxied body.
+          const headers = { ...up.headers };
+          delete headers["transfer-encoding"];
+          delete headers.connection;
+          res.writeHead(up.statusCode ?? 502, headers);
+          up.pipe(res);
+        },
+      );
+      upstream.on("error", () => {
+        if (res.headersSent) res.destroy();
+        else {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("bridge unreachable");
+        }
+      });
+      req.on("close", () => upstream.destroy());
       return;
     }
     if (

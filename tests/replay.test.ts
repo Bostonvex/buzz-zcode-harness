@@ -12,6 +12,7 @@ import {
   MAX_REPLAY_LIMIT,
   fullSlice,
   readTailLimit,
+  replayMessages,
   sliceBefore,
   sliceTail,
 } from "../src/handlers/replay.js";
@@ -263,5 +264,255 @@ describe("replay batch lock", () => {
     releaseBatch();
     await Promise.all([batch, send]);
     expect(events).toEqual(["batch-start", "batch-end", "send"]);
+  });
+});
+
+describe("replayMessages collapsed harness blocks", () => {
+  function collectCx(): {
+    cx: { notify: (method: string, params: unknown) => Promise<void> };
+    updates: Array<{ update?: { sessionUpdate?: string } } & Record<string, unknown>>;
+  } {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      cx: {
+        notify: async (_method: string, params: unknown) => {
+          updates.push(params as Record<string, unknown>);
+        },
+      },
+      updates,
+    };
+  }
+
+  const HANDOFF_TEXT =
+    "This session is being continued from a previous conversation that ran out " +
+    "of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. …";
+
+  const READ_TEXT =
+    'Called the Read tool with the following input: {"file_path":"/tmp/ws/src/a.go"}\n' +
+    "Result of calling the Read tool:\npackage main";
+
+  it("collapses a semantics-tagged compact_summary under the store's title", async () => {
+    const { cx, updates } = collectCx();
+    const m: ZcodeMessage = {
+      info: {
+        id: "cs1",
+        role: "user",
+        semantics: { kind: "compact_summary", transcriptVisibility: "hidden" },
+        summary: { title: "Compact summary", body: "…" },
+      },
+      parts: [{ type: "text", text: HANDOFF_TEXT }],
+    };
+    await replayMessages(cx, "s", [m]);
+    expect(updates).toHaveLength(1);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe("Compact summary");
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("compact");
+    // The hidden flag never suppresses the compaction card itself.
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(HANDOFF_TEXT);
+  });
+
+  it("drops hidden harness plumbing that matches no collapse shape", async () => {
+    const { cx, updates } = collectCx();
+    const m: ZcodeMessage = {
+      info: {
+        id: "sr1",
+        role: "user",
+        semantics: {
+          kind: "system_reminder",
+          source: "plan_file_reference",
+          transcriptVisibility: "hidden",
+        },
+      },
+      parts: [
+        {
+          type: "text",
+          text: "A plan file exists from plan mode at: /tmp/plan.md\n\nPlan contents: …",
+        },
+      ],
+    };
+    await replayMessages(cx, "s", [m]);
+    expect(updates).toHaveLength(0);
+  });
+
+  it("keeps replaying visible user messages (no semantics gate)", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [msg("u9", "user", "real question")]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("user_message_chunk");
+    expect((u.content as { text: string }).text).toBe("real question");
+  });
+
+  it("replays a context handoff as a collapsed tool_call, not a user message", async () => {
+    const { cx, updates } = collectCx();
+    const n = await replayMessages(cx, "s", [msg("h1", "user", HANDOFF_TEXT)]);
+    expect(n).toBe(1);
+    expect(updates).toHaveLength(1);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe("Context handoff");
+    expect(u.toolCallId).toBe("histfold_h1");
+    expect(u.status).toBe("completed");
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content[0]!.content.text).toBe(HANDOFF_TEXT);
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("context-handoff");
+  });
+
+  it("replays a textualized tool call with a path-bearing title", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [msg("t1", "user", READ_TEXT)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe("Read · /tmp/ws/src/a.go");
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(READ_TEXT);
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("tool-transcript");
+  });
+
+  it("falls back to the bare tool name when the input is not JSON", async () => {
+    const { cx, updates } = collectCx();
+    const text =
+      "Called the Grep tool with the following input: {not json at all}\nResult of calling…";
+    await replayMessages(cx, "s", [msg("t2", "user", text)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.title).toBe("Grep tool");
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(text);
+  });
+
+  it("collapses task-notifications with the decoded summary as title", async () => {
+    const { cx, updates } = collectCx();
+    const text =
+      "<task-notification>\n<task-id>exec_bed88298</task-id>\n" +
+      "<tool-use-id>call_1a3782c9</tool-use-id>\n" +
+      "<output-file>/tmp/call-stdout.log</output-file>\n<status>completed</status>\n" +
+      '<summary>Background command "Build debug Android APK for testing" completed (exit code 0)</summary>\n' +
+      "</task-notification>";
+    await replayMessages(cx, "s", [msg("n1", "user", text)]);
+    expect(updates).toHaveLength(1);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe('Background command "Build debug Android APK for testing" …');
+    expect(u.toolCallId).toBe("histfold_n1");
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(text);
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("task-notification");
+  });
+
+  it("falls back to a generic title when a task-notification has no summary", async () => {
+    const { cx, updates } = collectCx();
+    const text = "<task-notification>\n<task-id>exec_x</task-id>\n</task-notification>";
+    await replayMessages(cx, "s", [msg("n2", "user", text)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.title).toBe("Background task");
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("task-notification");
+  });
+
+  it("caps long title values at 60 characters", async () => {
+    const { cx, updates } = collectCx();
+    const long = "/".repeat(100);
+    const text = `Called the Read tool with the following input: {"file_path":"${long}"}\n…`;
+    await replayMessages(cx, "s", [msg("t3", "user", text)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect((u.title as string).length).toBeLessThanOrEqual("Read · ".length + 60);
+  });
+
+  it("keeps real user and agent speech as message chunks (regression)", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      msg("u9", "user", "real question"),
+      msg("a9", "assistant", "answer"),
+    ]);
+    expect(updates.map((p) => p.update!.sessionUpdate)).toEqual([
+      "user_message_chunk",
+      "agent_message_chunk",
+    ]);
+  });
+
+  it("emits one collapsed tool_call per compaction", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      msg("h1", "user", HANDOFF_TEXT),
+      msg("u1", "user", "hi"),
+      msg("h2", "user", HANDOFF_TEXT),
+    ]);
+    const kinds = updates.map((p) => p.update!.sessionUpdate);
+    expect(kinds).toEqual(["tool_call", "user_message_chunk", "tool_call"]);
+    expect(updates[0]!.update!.toolCallId).toBe("histfold_h1");
+    expect(updates[2]!.update!.toolCallId).toBe("histfold_h2");
+  });
+});
+
+describe("replayMessages tool history parts", () => {
+  function collectCx(): {
+    cx: { notify: (method: string, params: unknown) => Promise<void> };
+    updates: Array<{ update?: { sessionUpdate?: string } } & Record<string, unknown>>;
+  } {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      cx: {
+        notify: async (_method: string, params: unknown) => {
+          updates.push(params as Record<string, unknown>);
+        },
+      },
+      updates,
+    };
+  }
+
+  it("attaches input and output as content so the call expands non-empty", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            id: "part_1",
+            tool: "Read",
+            state: {
+              status: "completed",
+              title: "Read REMOTE-CLIENTS.md",
+              input: { file_path: "/docs/REMOTE-CLIENTS.md" },
+              output: "1\t# Remote Clients…",
+            },
+          },
+        ],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.toolCallId).toBe("part_1");
+    expect(u.title).toBe("Read REMOTE-CLIENTS.md");
+    expect(u.status).toBe("completed");
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content).toHaveLength(2);
+    expect(content[0]!.content.text).toContain("file_path");
+    expect(content[1]!.content.text).toBe("1\t# Remote Clients…");
+    expect((u._meta as { claudeCode: { toolName: string } }).claudeCode.toolName).toBe("Read");
+  });
+
+  it("keeps a string input as-is and tolerates missing input/output", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [{ type: "tool", id: "part_2", tool: "Bash", state: { input: "ls -la" } }],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content).toHaveLength(1);
+    expect(content[0]!.content.text).toBe("ls -la");
+    expect(u.title).toBe("Bash"); // no state.title → tool name fallback
+  });
+
+  it("omits content entirely when the part has no payload", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [{ type: "tool", id: "part_3", tool: "TodoWrite" }],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.content).toBeUndefined();
+    expect(u.title).toBe("TodoWrite");
   });
 });

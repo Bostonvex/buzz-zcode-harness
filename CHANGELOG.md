@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-18
+
+### Added
+
+- Replayed `<task-notification>` blocks (background task / sub-agent
+  completion notices injected by the harness as standalone user messages)
+  now arrive as collapsed `tool_call` updates (`_meta.zcode.collapsed` kind
+  `task-notification`) with the decoded `<summary>` line as the title,
+  instead of a wall of XML pseudo-user text.
+- Compaction markers survive replay: on backends that tag compaction
+  products with `semantics.kind: "compact_summary"`, the replayed summary
+  collapses under the store's own title (`Compact summary`, collapsed kind
+  `compact`) instead of the generic `Context handoff` — the bridge's live
+  🔄/✓ auto-compact notices never enter backend history, so this card is the
+  durable record that a compaction (auto-compact included) happened there.
+
+### Fixed
+
+- A prompt sent from one client now streams to the others as a
+  `user_message_chunk` echo (messageId prefixed `uprompt_`, prompting client
+  excluded — it renders its own outgoing message locally). Previously a turn
+  driven from the editor or a remote attach appeared on the other clients
+  without the user message that started it. Verified live: the bridge
+  already broadcasts thought/text/tool updates to every attached client,
+  both directly and through the hub proxy; the user's prompt text was the
+  one piece that never left the prompting client.
+
+- Replayed tool calls now carry their payload: history tool parts hold the
+  invocation input and result text under `state`, but the replay only sent
+  title/status — expanding a replayed Read/Edit/Bash call in a remote client
+  showed an empty body. The tool_call update now attaches input (JSON or raw
+  string) and the backend-truncated output as content blocks, and takes the
+  title/status from `state` (the previous top-level reads never matched, so
+  titles fell back to the bare tool name).
+- Replay no longer leaks hidden harness plumbing: synthetic messages the
+  backend marks `transcriptVisibility: "hidden"` and that fit no collapse
+  shape (plan-file reference reminders and similar) were replayed verbatim
+  as `user_message_chunk` walls of text; they are dropped now, matching the
+  backend's own transcript visibility.
+
+### Changed
+
+- Remote discovery session entries are now deduped across instances at the
+  hub (freshest `updatedAt` wins, then newest instance). Several bridges of
+  the same project can hold the same live conversation — a leaked bridge's
+  copy can no longer surface as a duplicate entry that opens empty; the
+  hub's dedupe picks the bridge actually driving the session. The listing
+  keeps two gates: conversations must be currently running (live in the
+  advertising bridge) and accessible (resolvable and resumable through it).
+  A `session/list` RPC per heartbeat enriches live entries with the store's
+  authoritative title and a cross-bridge `updatedAt`, degrading to
+  summaries-only on failure. Advertised ids stay the editor-facing ACP
+  session ids so a remote attach shares the editor tab's live stream.
+- Removed the 0.5.1 heartbeat availability probe (`session-liveness.ts`) and
+  the `unavailable` summary flag: live measurements showed the backend
+  serves full `session/messages` in 35–120ms (the probe's 3s timeout branch
+  never fired in production logs), and taking a session over in a second
+  backend does not invalidate the first backend's copy — the probe's premise
+  did not hold and its per-heartbeat RPCs were pure overhead. Duplicate
+  protection now lives in the hub's cross-instance dedupe.
+
+## [0.6.0] - 2026-08-18
+
+### Added
+
+- Read-only session file access over hub-proxied HTTP (ADR-0004). The bridge's
+  loopback endpoint serves `GET /fs/list` and `GET /fs/file`, scoped to each
+  session's cwd (`path.resolve` + `realpath`; `..` segments and symlink escapes
+  are rejected), and the hub byte-proxies them at `/api/instances/{id}/fs/*`
+  behind the existing token — no new port, and the hub still holds no path
+  semantics. Files stream with `Content-Length` and an extension-based
+  Content-Type; `offset`/`length` serves byte windows (206 + `Content-Range`),
+  `line`/`limit` streams text windows (`X-Zcode-First-Line`) with O(limit)
+  memory, so arbitrarily large logs are windowable. `initialize` advertises the
+  capability as `agentCapabilities._meta.zcode.fs`. Contract:
+  `docs/REMOTE-CLIENTS.md`. Also fixes `session/resume`/`session/load` never
+  recording the session cwd, which the new endpoint relies on.
+
+### Changed
+
+- Replayed harness plumbing now arrives as collapsed `tool_call` updates
+  instead of `user_message_chunk` walls of text: context-handoff summaries
+  (title "Context handoff", one per compaction) and resume-rewritten tool
+  transcripts ("Called the X tool with the following input…", title
+  "X · <first input value>"). `tool_call` is the one ACP update kind every
+  editor folds by default, so Zed/JetBrains collapse them with zero client
+  opt-in; the full text rides the tool_call's content block and
+  `_meta.zcode.collapsed` keeps its `kind` semantics
+  (`context-handoff`/`tool-transcript`). Contract: `docs/REPLAY-GUIDE.md`.
+
 ## [0.5.1] - 2026-08-18
 
 ### Fixed

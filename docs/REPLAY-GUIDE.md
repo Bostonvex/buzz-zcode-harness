@@ -72,31 +72,61 @@ differently:
 - `usage_update` / `available_commands_update` are session-level metadata,
   not list items.
 
-### Collapsed harness blocks (`_meta.zcode.collapsed`)
+### Collapsed harness blocks (tool_call form)
 
-Replayed user messages that are harness plumbing rather than user speech may
-carry a top-level `_meta` on the `session/update` notification:
+Replayed user messages that are harness plumbing rather than user speech are
+delivered as **`tool_call` updates, not `user_message_chunk`** — tool_call is
+the one update kind every ACP editor (Zed, JetBrains, …) renders folded by
+default, so the collapse works with zero client-side opt-in. The full text
+rides in the tool_call's `content` block (expandable); the `kind` rides the
+update's `_meta`:
 
 ```json
 {
   "sessionId": "…",
   "update": {
-    "sessionUpdate": "user_message_chunk",
-    "content": { "type": "text", "text": "This session is being continued …" },
-    "messageId": "…"
-  },
-  "_meta": { "zcode": { "collapsed": true, "kind": "context-handoff" } }
+    "sessionUpdate": "tool_call",
+    "toolCallId": "histfold_…",
+    "title": "Context handoff",
+    "kind": "other",
+    "status": "completed",
+    "content": [
+      {
+        "type": "content",
+        "content": { "type": "text", "text": "This session is being continued …" }
+      }
+    ],
+    "_meta": { "zcode": { "collapsed": true, "kind": "context-handoff" } }
+  }
 }
 ```
 
-- `kind: "context-handoff"` — the context-window continuation summary. The
-  full text is in the chunk as usual; render it **collapsed behind an expand
-  control** (e.g. a one-line label like "前序会话摘要") instead of a wall of
-  text attributed to the user.
+- `kind: "context-handoff"` — the context-window continuation summary, one
+  per compaction (a long session can carry dozens). Title: `Context handoff`.
+- `kind: "compact"` — the same compaction product on backends that tag it
+  with `semantics.kind: "compact_summary"` (session/compact, auto-compact,
+  and context-window handoff all land here). Title comes from the store's
+  own `summary.title` (observed: `Compact summary`) — so a reload shows
+  where history was compacted instead of silently missing the bridge's live
+  🔄/✓ auto-compact notices, which never enter backend history.
+- `kind: "tool-transcript"` — `Called the X tool with the following input:
+{…}\nResult of calling…` messages: tool_use/tool_result pairs the harness
+  rewrites into text on resume, one per historical tool call. Title is
+  `X · <first string value of the input JSON>` (e.g.
+  `Read · /src/main.go`), capped at 60 characters; falls back to `X tool`.
+- `kind: "task-notification"` — `<task-notification>` blocks the harness
+  injects when a background task (build, sub-agent) finishes, delivered as
+  standalone user messages. Title is the block's decoded `<summary>` line
+  (e.g. `Background command "Build release APK" completed (exit code 0)`),
+  capped at 60 characters; falls back to `Background task`.
 - Harness noise that carries no value (TodoWrite/Read usage nudges) is
-  stripped before replay — you never see it.
-- Unknown `kind`s: render collapsed too (or fall back to plain text). Ignoring
-  `_meta` entirely is always safe — the text is complete without it.
+  stripped before replay — you never see it. Synthetic messages the backend
+  marks `transcriptVisibility: "hidden"` and that fit no collapse shape
+  (plan-file references and similar plumbing) are dropped entirely.
+- Render all kinds as an ordinary collapsed tool card keyed by `toolCallId`;
+  the text is complete behind the expand. Unknown `kind`s: render collapsed
+  too. These updates never collide with live tool_call ids (they carry the
+  `histfold_` prefix).
 
 ## Turn running state (`replayMeta.turnActive` + `$/zcode/turnState`)
 

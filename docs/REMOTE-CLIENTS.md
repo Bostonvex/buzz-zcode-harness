@@ -74,20 +74,34 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   registered bridge's loopback port and prunes unreachable ones before
   answering. A plain `GET` returns the heartbeat-based view, which can list a
   hard-killed bridge for up to the 30s heartbeat TTL.
-- `sessions[].sessionId` is the ACP session id: pass it to `session/load`
-  after connecting. `title` is adopted from the backend for resumed sessions
-  and set after a fresh session's first turn — it can still be absent for a
-  session that has never completed a turn.
-- `sessions` only lists sessions with real interaction. Editors restart into a
-  stored placeholder and materialize an empty backend session — those stay
-  hidden and appear within one heartbeat (~10s) after their first prompt (or
-  a titled resume/load).
-- `sessions` is also **availability-verified**: before every heartbeat the
-  bridge probes its idle sessions against its own backend, and a session it
-  can no longer serve (e.g. the project restarted under a newer bridge while
-  the old process leaked) is dropped from the list within one heartbeat
-  (~10s) instead of lingering as an entry that opens empty. It reappears if
-  the bridge can serve it again. Treat list membership as "openable".
+- `sessions[].sessionId` is the **ACP session id the editor uses** for that
+  conversation (placeholder ids are stable across bridges — Zed stores them
+  and the durable alias store records them). Attaching under it via
+  `session/load` puts the remote client on the same notification stream as
+  the editor tab: turns driven from either side stream live to both. A
+  conversation with no editor placeholder is advertised under its backend
+  id (`sess_…`), still loadable via pass-through resume. `title` comes from
+  the backend session store; sessions that never completed a turn have no
+  title and are not listed.
+- **Prompt echo**: when any client sends `session/prompt`, the bridge
+  broadcasts the user's text to every OTHER attached client as a
+  `user_message_chunk` (messageId prefixed `uprompt_`). Your own prompts are
+  never echoed back to you — render them locally as you send them. Without
+  this rule a turn driven from the other side arrives without the user
+  message that started it.
+- `sessions` is gated on two rules: the conversation must be **currently
+  running** (a live registration in the advertising bridge — an open editor
+  tab, or a remote attachment that ran a turn) and **accessible** (every
+  listed id resolves and resumes through that bridge). Retired conversations
+  of the project are NOT listed even though the backend store still has them
+  — the store only enriches live entries with the authoritative title and a
+  cross-bridge `updatedAt`.
+- Entries are **deduped across instances**: several bridges of the same
+  project (e.g. a leaked old process plus the current one) can all hold the
+  same live conversation under the same id; the hub keeps one copy per
+  session — the instance whose copy has the freshest `updatedAt` (i.e. the
+  bridge actually driving it). Attach to whichever instance the entry
+  appears under.
 - Poll every 3–5s. There is no push notification for registry changes yet.
 - Fields are **additive-only** across releases — ignore fields you don't know.
 
@@ -180,6 +194,43 @@ exactly:
   render the same status line the CLI would (e.g. auth expired) and retry
   later. Only transport-level failures reject the request.
 - Cached ~10s server-side (same caches as the `/quota` command).
+
+## Session files (read-only)
+
+Browse and download files of a session's project — served by the bridge,
+byte-proxied by the hub, guarded by the same token as everything else
+(ADR-0004). Capability probe: `initialize` returns
+`agentCapabilities._meta.zcode.fs === true`.
+
+```text
+GET {hub}/api/instances/{id}/fs/list?sessionId=…&path=<rel>    one directory level
+GET {hub}/api/instances/{id}/fs/file?sessionId=…&path=<rel>    file bytes
+    &offset=…&length=…     byte window → 206 + Content-Range
+    &line=…&limit=…        text window (defaults 1 / 200, cap 5000)
+```
+
+- `path` resolves against the session's root cwd — the directory the session
+  was created or loaded with. Absolute paths work only when they land inside
+  it; `..` segments and symlinks pointing outside the root are rejected
+  (403).
+- `list` returns `{ root, entries: [{name, kind: "file"|"dir"|"symlink",
+size, mtime}], truncated }`. Dotfiles are included — filter client-side.
+  Entries sort dirs-first in byte order; `truncated: true` marks more than
+  2000 entries. Symlinks report placeholder stats (`size: 0`); reading
+  through one resolves and scope-checks the target.
+- `file` streams with `Content-Length` and a Content-Type inferred from the
+  extension (`application/octet-stream` fallback) — `<a download>`,
+  `<img src>`, and `fetch` streaming all work directly. `HEAD` is supported.
+- Byte and line windows are mutually exclusive (400). A line window returns
+  `text/plain` with `X-Zcode-First-Line` set to the first served line;
+  memory is O(limit), so it works on arbitrarily large logs.
+- Errors: `400` bad params · `403` unknown session / path escapes the root ·
+  `404` not found / unknown instance · `416` offset beyond EOF · `502`
+  bridge port unreachable. A `404` right after a bridge upgrade is the hub
+  self-upgrading to learn the route — retry.
+- Read-only by design, and the token remains the security boundary as
+  everywhere else; the session root contains accidents (wrong path joins),
+  not attackers.
 
 ## Slash-command handling
 

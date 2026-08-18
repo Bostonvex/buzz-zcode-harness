@@ -28,8 +28,8 @@ import { WebSocketServer } from "ws";
 
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
+import { createFileHandler } from "./file-endpoint.js";
 import type { RemoteConfig } from "./config.js";
-import { verifySessionAvailability } from "./session-liveness.js";
 
 /** How often the bridge re-registers with the hub (also the heartbeat). */
 const HEARTBEAT_MS = 10_000;
@@ -54,26 +54,111 @@ function tryListen(server: Server, port: number): Promise<boolean> {
 }
 
 /**
- * Session summaries for the hub's discovery API. Only sessions with real
- * interaction (`hasActivity`) that this backend can still serve (not
- * `unavailable`) are pushed: an editor restart auto-resumes its stored
- * placeholder, materializing an empty backend session — pushing that would
- * make remote clients list (and open) a conversation that never happened —
- * and a leaked bridge whose backend lost a session to a newer bridge must
- * not keep advertising a copy that opens empty. The hub replaces the whole
- * list on every register, so both gaining activity and becoming serveable
- * again show up within one heartbeat (~10s); see session-liveness.ts.
+ * Session summaries for the hub's discovery API. Two gates, in the user's
+ * words: the conversation must be CURRENTLY RUNNING, and it must be
+ * ACCESSIBLE through the bridge that lists it.
+ *
+ * - Running: membership comes only from this bridge's live registrations
+ *   (`sessionSummaries` with `hasActivity`) — open editor tabs and remote
+ *   attachments that ran a turn. The backend store also holds every retired
+ *   conversation of the project (dozens of same-titled test runs included),
+ *   so deriving membership from `session/list` floods the list with
+ *   duplicates; the list only ENRICHES members with the store's authoritative
+ *   title and a cross-bridge updatedAt (which also steers the hub's dedupe
+ *   toward the instance actually driving the session).
+ * - Accessible: every member is a registered acp→zcode mapping here, so a
+ *   remote `session/load` resolves and resumes it on demand. Lazy
+ *   placeholders without a backend session never ran a turn and stay
+ *   invisible.
+ *
+ * Advertised ids are the ACP session ids the EDITOR uses (placeholder ids,
+ * stable across bridges via Zed's own storage and the durable alias store) —
+ * NOT raw backend session ids. A remote client that attaches under the same
+ * id as the editor tab shares the conversation's notification stream, so
+ * turns driven from either side stream live to both; advertising backend ids
+ * instead silently split the two views (Zed stopped seeing remote-driven
+ * turns). Sessions known here only under a backend id (no placeholder) are
+ * advertised under that backend id — still loadable via pass-through resume.
+ * Bridges of the same project derive the same id for the same conversation,
+ * which is what lets the hub dedupe across instances.
+ *
+ * A failed `session/list` degrades to summaries-only so a backend hiccup
+ * never blanks the discovery list.
  */
-export function sessionsPayload(
+export async function collectSessions(
   server: ZcodeAcpServer,
-): Array<{ sessionId: string; title?: string; updatedAt: number }> {
-  return Array.from(server.sessionSummaries.entries())
-    .filter(([, s]) => s.hasActivity && !s.unavailable)
-    .map(([sessionId, s]) => ({
-      sessionId,
-      ...(s.title !== undefined ? { title: s.title } : {}),
-      updatedAt: s.updatedAt,
-    }));
+): Promise<Array<{ sessionId: string; title?: string; updatedAt: number }>> {
+  // zcodeSid → freshest live entry (an editor tab and a remote attachment
+  // can hold two acpSids for the same conversation).
+  const live = new Map<string, { sessionId: string; title?: string; updatedAt: number }>();
+  for (const [acpSid, summary] of server.sessionSummaries) {
+    if (!summary.hasActivity) continue;
+    const zcodeSid = server.resolveSid(acpSid);
+    if (!zcodeSid) continue; // pure placeholder — no backend session behind it
+    const prev = live.get(zcodeSid);
+    if (prev && summary.updatedAt <= prev.updatedAt) continue;
+    live.set(zcodeSid, {
+      sessionId: acpSid,
+      ...(summary.title !== undefined ? { title: summary.title } : {}),
+      updatedAt: summary.updatedAt,
+    });
+  }
+
+  const backend = server.backend;
+  if (backend && !backend.isDead && live.size > 0) {
+    try {
+      // The backend filters by workspace server-side (verified live: a bogus
+      // path returns zero sessions).
+      const cwd = server.projectCwd();
+      const resp = await backend.request(
+        server.nextId(),
+        "session/list",
+        { workspace: { workspacePath: cwd, workspaceKey: cwd } },
+        10_000,
+      );
+      if (!resp.error) {
+        const sessions =
+          (
+            (resp.result ?? {}) as {
+              sessions?: Array<{
+                sessionId?: string;
+                title?: string;
+                updatedAt?: unknown;
+              }>;
+            }
+          ).sessions ?? [];
+        for (const s of sessions) {
+          if (!s.sessionId) continue;
+          const cur = live.get(s.sessionId);
+          if (!cur) continue; // not running here — the store entry is history
+          // The store is the title authority (adoptStoredTitle reads it) and
+          // its updatedAt moves when ANY bridge drives the session. The
+          // advertised id stays the local acpSid the entry was keyed under.
+          const storeTitle = typeof s.title === "string" && s.title ? s.title : undefined;
+          const title = storeTitle ?? cur.title;
+          live.set(s.sessionId, {
+            sessionId: cur.sessionId,
+            ...(title !== undefined ? { title } : {}),
+            updatedAt: Math.max(cur.updatedAt, toMillis(s.updatedAt)),
+          });
+        }
+      }
+    } catch {
+      /* best-effort: keep summaries-only values */
+    }
+  }
+
+  return Array.from(live.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** session/list timestamps: ms epoch (observed) or ISO string (defensive). */
+function toMillis(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
 }
 
 async function postJson(url: string, body: unknown, timeoutMs = 3000): Promise<Response> {
@@ -98,10 +183,12 @@ export async function startRemoteEndpoint(
   const acpHttpHandler = createNodeHttpHandler(acpServer);
   const wss = new WebSocketServer({ noServer: true });
   const upgradeHandler = createNodeWebSocketUpgradeHandler(acpServer, wss);
+  const fileHandler = createFileHandler(server);
 
   const httpServer = createServer((req, res) => {
     const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
     if (path === "/acp") acpHttpHandler(req, res);
+    else if (path.startsWith("/fs/")) fileHandler(req, res);
     else {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("not found");
@@ -141,13 +228,13 @@ export async function startRemoteEndpoint(
   let authRejected = false;
   let spawnThrottledUntil = 0;
 
-  const payload = () => ({
+  const payload = (sessions: Array<{ sessionId: string; title?: string; updatedAt: number }>) => ({
     token: config.token,
     id: instanceId,
     port,
     pid: process.pid,
     workspace: server.workspaceLabel(),
-    sessions: sessionsPayload(server),
+    sessions,
     // Lets the hub detect that it is older than this bridge and restart
     // itself (we then re-spawn it from this dist — see registerOnce).
     version: AGENT_INFO.version,
@@ -186,20 +273,26 @@ export async function startRemoteEndpoint(
     }
   };
 
+  // Last-good session list: an unexpected collectSessions failure must not
+  // blank the discovery payload, so we keep advertising the previous one.
+  let lastSessions: Array<{ sessionId: string; title?: string; updatedAt: number }> = [];
+
   const registerOnce = async (): Promise<void> => {
     if (stopped || authRejected) return;
-    // Availability check before every heartbeat: sessions this backend can no
-    // longer serve (leaked-bridge scenario) are dropped from the payload, and
-    // previously-dropped ones that answer again are restored. Never throws;
-    // wrapped anyway so a surprise failure can't fall into the hub-spawn
-    // catch below (which would misread it as "hub unreachable").
+    // Project-scoped session list before every heartbeat (session/list merge,
+    // ~100-300ms). Never throws; wrapped anyway so a surprise failure can't
+    // fall into the hub-spawn catch below (which would misread it as "hub
+    // unreachable").
     try {
-      await verifySessionAvailability(server);
+      lastSessions = await collectSessions(server);
     } catch {
-      /* best-effort */
+      /* keep lastSessions */
     }
     try {
-      const res = await postJson(`http://127.0.0.1:${config.hubPort}/api/register`, payload());
+      const res = await postJson(
+        `http://127.0.0.1:${config.hubPort}/api/register`,
+        payload(lastSessions),
+      );
       if (res.status === 401) {
         authRejected = true;
         warn(

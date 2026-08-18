@@ -268,16 +268,97 @@ function stripSystemReminders(text: string): string {
 }
 
 /**
- * Harness context-handoff summaries ("This session is being continued from a
- * previous conversation…") are informative plumbing: replayed IN FULL but
- * flagged via `_meta.zcode.collapsed` so capable clients render them folded
- * behind an expand control instead of as a wall of pseudo-user text. Clients
- * that ignore `_meta` (e.g. Zed) display the text unchanged.
+ * Harness plumbing that replays as a COLLAPSED tool_call instead of a wall of
+ * pseudo-user text. tool_call is the only ACP update kind every editor
+ * (Zed, JetBrains, …) renders folded by default — a plain text chunk with a
+ * `_meta` hint only helps clients that opt in. The full text always rides in
+ * the tool_call's content block, so nothing is lost. Three shapes today:
+ *
+ * - context-handoff: the "This session is being continued from a previous
+ *   conversation…" summaries, one per compaction (a long session can carry
+ *   dozens).
+ * - compact: the same compaction product on backends that tag it with
+ *   `semantics.kind: "compact_summary"` — collapsed under the store's own
+ *   summary title ("Compact summary"), so a reload shows where history was
+ *   compacted (auto-compact included) instead of silently dropping the
+ *   bridge's live 🔄/✓ notices, which never enter backend history.
+ * - tool-transcript: "Called the X tool with the following input: {…}\nResult
+ *   of calling…" — tool_use/tool_result pairs the harness rewrites into
+ *   plain text on resume, one message per historical tool call.
+ * - task-notification: "<task-notification>…" blocks the harness injects when
+ *   a background task (build, sub-agent) finishes — standalone user messages
+ *   whose useful part is just the <summary> line.
+ *
+ * Clients that already understand `_meta.zcode.collapsed` keep working: the
+ * kind rides the tool_call's `_meta` as before.
  */
 const CONTEXT_HANDOFF = /^\s*This session is being continued from a previous conversation/;
+const TOOL_TRANSCRIPT = /^\s*Called the (\w+) tool with the following input:\s*(\{[^\n]*\})/;
+const TASK_NOTIFICATION = /^\s*<task-notification>/;
 
-function handoffMeta(): { zcode: { collapsed: true; kind: "context-handoff" } } {
-  return { zcode: { collapsed: true, kind: "context-handoff" } };
+type CollapseKind = "compact" | "context-handoff" | "tool-transcript" | "task-notification";
+
+function collapsedMeta(kind: CollapseKind): { zcode: { collapsed: true; kind: CollapseKind } } {
+  return { zcode: { collapsed: true, kind } };
+}
+
+/** First string value of the tool-input JSON, capped for a one-line title. */
+function transcriptTitle(tool: string, inputJson: string): string {
+  try {
+    const input = JSON.parse(inputJson) as Record<string, unknown>;
+    const first = Object.values(input).find((v): v is string => typeof v === "string");
+    if (first) {
+      const value = first.length > 60 ? first.slice(0, 57) + "…" : first;
+      return `${tool} · ${value}`;
+    }
+  } catch {
+    /* non-JSON input — fall through */
+  }
+  return `${tool} tool`;
+}
+
+/** <summary> line of a task-notification, entities decoded, capped at 60. */
+function notificationTitle(text: string): string {
+  const summary = /<summary>([^<]*)<\/summary>/.exec(text)?.[1];
+  if (summary) {
+    const decoded = summary
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .trim();
+    if (decoded) return decoded.length > 60 ? decoded.slice(0, 57) + "…" : decoded;
+  }
+  return "Background task";
+}
+
+/**
+ * Classify a user text part as harness plumbing, returning the collapsed
+ * tool_call title + kind, or null for real user speech.
+ *
+ * Semantics-tagged payloads (newer backends) are authoritative: a
+ * compact_summary message collapses under the store's own title regardless of
+ * its text shape. The regexes below serve legacy untagged payloads.
+ */
+function collapseUserText(
+  text: string,
+  semantics?: ZcodeMessage["info"]["semantics"],
+  summary?: ZcodeMessage["info"]["summary"],
+): { title: string; kind: CollapseKind } | null {
+  if (semantics?.kind === "compact_summary") {
+    const raw =
+      typeof summary?.title === "string" && summary.title ? summary.title : "Compact summary";
+    return { title: raw.length > 60 ? raw.slice(0, 57) + "…" : raw, kind: "compact" };
+  }
+  if (CONTEXT_HANDOFF.test(text)) return { title: "Context handoff", kind: "context-handoff" };
+  const tool = TOOL_TRANSCRIPT.exec(text);
+  if (tool) {
+    return { title: transcriptTitle(tool[1]!, tool[2]!), kind: "tool-transcript" };
+  }
+  if (TASK_NOTIFICATION.test(text)) {
+    return { title: notificationTitle(text), kind: "task-notification" };
+  }
+  return null;
 }
 
 /**
@@ -307,16 +388,37 @@ export async function replayMessages(
           text = stripSystemReminders(text);
           if (!text) continue;
         }
-        const collapsed = role === "user" && CONTEXT_HANDOFF.test(text);
-        await cx.notify("session/update", {
-          sessionId: acpSid,
-          update: {
-            sessionUpdate: role === "user" ? "user_message_chunk" : "agent_message_chunk",
-            content: { type: "text", text },
-            messageId: mid,
-          },
-          ...(collapsed ? { _meta: handoffMeta() } : {}),
-        });
+        const collapse =
+          role === "user" ? collapseUserText(text, info.semantics, info.summary) : null;
+        if (collapse) {
+          await cx.notify("session/update", {
+            sessionId: acpSid,
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: `histfold_${mid}`,
+              title: collapse.title,
+              kind: "other",
+              status: "completed",
+              content: [{ type: "content", content: { type: "text", text } }],
+              _meta: collapsedMeta(collapse.kind),
+            },
+          });
+        } else if (role === "user" && info.semantics?.transcriptVisibility === "hidden") {
+          // Hidden harness plumbing that fits no collapse shape (plan-file
+          // references and similar synthetic reminders). The backend itself
+          // keeps these out of the transcript; replaying them as user text
+          // leaks pages of plumbing into the conversation view.
+          continue;
+        } else {
+          await cx.notify("session/update", {
+            sessionId: acpSid,
+            update: {
+              sessionUpdate: role === "user" ? "user_message_chunk" : "agent_message_chunk",
+              content: { type: "text", text },
+              messageId: mid,
+            },
+          });
+        }
       } else if (ptype === "reasoning") {
         const rp = p as { text?: string; content?: string };
         const text = rp.text ?? rp.content ?? "";
@@ -334,19 +436,39 @@ export async function replayMessages(
         const tp = p as {
           id?: string;
           tool?: string;
-          title?: string;
-          status?: string;
+          state?: {
+            title?: string;
+            status?: string;
+            input?: unknown;
+            output?: unknown;
+          };
         };
-        const title = tp.title ?? tp.tool ?? "tool call";
+        const st = tp.state ?? {};
         const histToolName = tp.tool ?? "";
+        // History tool parts carry their payload under `state` — the
+        // invocation input and the full (backend-truncated) result text.
+        // Attach both as content blocks so expanding a replayed call shows
+        // what was read/edited/ran; without content the row expands empty.
+        const content: Array<{ type: "content"; content: { type: "text"; text: string } }> = [];
+        if (st.input !== undefined && st.input !== null) {
+          const inputText =
+            typeof st.input === "string" ? st.input : JSON.stringify(st.input, null, 2);
+          if (inputText) {
+            content.push({ type: "content", content: { type: "text", text: inputText } });
+          }
+        }
+        if (typeof st.output === "string" && st.output) {
+          content.push({ type: "content", content: { type: "text", text: st.output } });
+        }
         await cx.notify("session/update", {
           sessionId: acpSid,
           update: {
             sessionUpdate: "tool_call",
             toolCallId: tp.id ?? `histtool_${randomUUID().slice(0, 8)}`,
-            title,
+            title: st.title ?? histToolName ?? "tool call",
             kind: "other",
-            status: (tp.status as acp.ToolCallStatus) ?? "completed",
+            status: (st.status as acp.ToolCallStatus) ?? "completed",
+            ...(content.length > 0 ? { content } : {}),
             ...(histToolName ? { _meta: { claudeCode: { toolName: histToolName } } } : {}),
           },
         });
