@@ -103,6 +103,9 @@ your editor. Zed (or any ACP editor over stdio) remains the primary client and
 owns the process: when the editor disconnects, the bridge — and every remote
 attachment — exits with it.
 
+A ready-made client — Android APK plus a self-hostable web build — lives at
+[william0wang/zcode-acp-remote](https://github.com/william0wang/zcode-acp-remote).
+
 ```text
 phone / browser ──WS── tunnel ── hub (127.0.0.1:8377, single entry)
                                    │ byte-level proxy
