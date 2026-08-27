@@ -7,6 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
+  bridge the editor uses, including slash-command completion with an
+  interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),
+  argument-free commands running on pick, and a welcome panel.
+- REPL renders via **native scrollback**: completed messages print once
+  through ink `<Static>` and belong to the terminal — native smooth
+  scrolling, selection/copy, and search work unchanged and history survives
+  exit. Only a compact dynamic footer repaints: live-turn tail (capped at
+  half the screen), queued-prompt panel, completion menu, prompt box.
+- The prompt line wraps across rows with CJK-aware caret placement
+  (`wrapEditorLine` + `locateCaret`); input-box growth is reserved in the
+  layout so the frame never overflows the terminal.
+- `/sessions` picker slides an 8-row window over the full session list
+  (position counter plus "N newer above / older below" hints) instead of
+  printing every entry; arrows move across the complete list either way.
+- Resuming a session replays only its recent tail — last 50 messages,
+  turn-aligned via ADR-0003 `_meta.zcode.limit` tail replay — instead of
+  dumping full history into scrollback; when truncated, the resume note says
+  exactly what was loaded (`showing last 50 of 1234 messages`).
+- Pasted or dragged-in content is handled safely: contiguous printable runs
+  apply as ONE editor op (`planChunkOps`), control/escape junk is stripped
+  before it reaches editor state (`sanitizeInputChunk`), prompts cap at
+  20k chars, and unexpected internal errors never kill the UI — they surface
+  as an `error absorbed` note while the REPL keeps running (a 5-in-10s
+  circuit breaker shuts down only if errors fire every frame).
+- Remote turns render live in the REPL (`$/zcode/turnState`), permission and
+  question requests answered elsewhere dismiss the local picker via the SDK
+  abort signal, AskUserQuestion renders as a structured form picker, and
+  ExitPlanMode heads as "plan approval" with the plan text inline.
+- The prompt-line status row carries a compact plan-quota readout
+  (`5h NN% · wk NN%`) refreshed every 10 minutes; failures hide silently.
+
+### Changed
+
+- `esc` interrupts a running turn whether or not prompts are queued (an open
+  completion menu still takes precedence); queued follow-ups drain one per
+  stop through the same command parsing as direct submits, so a queued
+  `/help` or `/exit` keeps working.
+- Config argument menus execute on pick ("enter switches now"), one-shot
+  commands run on pick ("enter runs it now"); other completions only fill.
+
+### Fixed
+
+- Pressing ↓ with no completion menu open no longer zombifies the whole UI:
+  the setState updater dereferenced a null menu during render, unmounting
+  React's tree under ink without any crash signal (found by review,
+  reproduced over pty).
+- Long pastes no longer crash the REPL: each pasted character used to
+  trigger a synchronous ink rerender inside one tick, tripping React's
+  nested-update limit ("Maximum update depth exceeded") — reproduced via
+  pty with the exact stack.
+- Cold-start race: picking a `/sessions` entry while the placeholder
+  `session/new` handshake was still in flight let the late fresh session
+  overwrite the resumed one; the placeholder is now discarded.
+- Resume no longer force-pins a session to the first config.json model
+  (faithful model preservation, overlay demoted to one-retry fallback).
+
+## [0.13.0] - 2026-08-26
+
+### Added
+
+- REPL interactive completion: typing `/` opens a command menu (↑/↓ move,
+  enter or tab picks the highlighted entry, esc dismisses). Picking `/model`,
+  `/mode`, or `/thought` opens the config options in the same menu (current
+  one marked `●`); the next pick inserts the value and a final enter sends
+  the switch — no hand-typed ids. Enter only sends an exact form: a full
+  non-config command (`/exit`) or a config command with its exact value.
+  REPL-local `/help` and `/exit` stay in the menu (merged with the
+  bridge-advertised commands) and in `/help` output.
+- REPL startup welcome panel: version, session directory, seeded config, and
+  key hints render above the fixed prompt box (agent-CLI style); the first
+  prompt pushes the panel into native scrollback.
+- zcode CLI auto-discovery: resolution is now `ZCODE_BIN` → `zcode` on `PATH`
+  → the `zcode.cjs` bundled inside the ZCode desktop app (standard install
+  locations for macOS/Windows/Linux). Bare `zcode-acp` works in a terminal
+  without editor-provided env; `ZCODE_BIN` is only needed for custom installs.
+
+### Changed
+
+- REPL prompt renders as a full-width rounded box; the `model · mode ·
+thought` status row moved inside the box (bottom), with a right-aligned
+  key-hint.
+
+### Fixed
+
+- The bridge no longer crashes with an unhandled `'error'` event when the
+  zcode CLI cannot be spawned (ENOENT): the spawn failure now fails requests
+  with a JSON-RPC error and logs an actionable hint (install/PATH/`ZCODE_BIN`).
+- Rapid double ctrl-c — the two keys can arrive coalesced in one input chunk,
+  which ink delivers without `ctrl` set — now exits the idle REPL; a
+  multi-line paste submits every line instead of dropping the first (stale
+  closure read the pre-chunk value).
+- Opencode Go quota percentages keep 0.1 precision (72.6% no longer renders
+  as 73%).
+
+## [0.12.0] - 2026-08-25
+
+### Added
+
+- Unified CLI entry `zcode-acp` (ADR-0007): bare invocation opens an
+  interactive Ink REPL (streaming output, tool rows, arrow-key permission
+  picker, config parity with editor dropdowns); `hub` and `quota` moved under
+  it as subcommands. The old standalone `zcode-acp-hub` and `zcode-quota`
+  bins were removed. Without a TTY (pipes, Windows editor shims) a bare
+  invocation falls back to the stdio ACP server so editor configs keep
+  working; `zcode-acp repl` errors instead of silently falling back.
+
 ## [0.11.9] - 2026-08-24
 
 ### Added
@@ -69,7 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-session differ only fires PlanUpdate on plan CHANGE, so a re-attaching
   client (the mobile app always re-attaches) never learned a plan a previous
   client had already seen. The load path now runs a throwaway differ whose
-  "__none__" sentinel makes diffPlan always emit, while the shared differ's
+  "**none**" sentinel makes diffPlan always emit, while the shared differ's
   full diff still runs for its mark-seen side effect (turn completion must
   not re-emit replayed history).
 - Regression test in `tests/load-plan-replay.test.ts` (fails without the

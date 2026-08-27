@@ -63,8 +63,16 @@ src/
 ├── cli.ts                Unified CLI entry (`zcode-acp`): subcommand dispatch
 │                         (bare invocation → REPL) (ADR-0007)
 ├── repl/                 Interactive REPL (bare `zcode-acp`): Ink UI + ACP client
-│   ├── model.ts          Pure turn state machine (SessionUpdate → entries)
-│   ├── App.tsx           Ink components (stream, tools, permission picker)
+│   ├── model.ts          Pure turn state machine + idle status fold (commands,
+│   │                     model/mode/thought selects, completion candidates,
+│   │                     editor wrap/caret math, local /help & listings)
+│   ├── App.tsx           Ink components — native-scrollback transcript
+│   │                     (<Static>, Claude Code model) + compact dynamic
+│   │                     footer (live-turn tail, queue panel, permission/
+│   │                     question/session pickers, completion menu, wrapped
+│   │                     input box). No alternate screen, no wheel capture.
+│   ├── input-buffer.ts   Pure caret-editing line editor (code-point caret,
+│   │                     Ctrl-B/F/A/E/U chords) — no React, testable
 │   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)
@@ -110,6 +118,19 @@ ZCode protocol types into ACP notifications directly — always translate.
   unhandledRejection. See `src/remote/broadcast.ts`.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
+- **REPL renders via native scrollback**: completed entries go through ink
+  `<Static>` once and belong to the terminal (scroll/selection/search all
+  native; history survives exit). Only the dynamic footer rerenders. Do NOT
+  reintroduce alt-screen viewports, wheel capture, or in-app scroll offsets —
+  that model was removed for being unfixably fragile.
+- **Height estimates ≠ ink layout**: ink wraps `<Text>` at word boundaries;
+  `estimateLines()` hard-cuts at column width. Never trust the numbers alone —
+  dynamic blocks (live-turn tail, queue panel) are contained by bottom-anchored
+  `overflow:hidden` boxes sized to the estimate so drift crops invisibly
+  inside instead of stretching the footer past the fold.
+- **REPL render state lives in run.ts, not React**: App re-renders from fresh
+  snapshots; anything that must persist across them (prompt-line editor,
+  queue, entries) belongs to run.ts's external store passed via snapshot props.
 
 ## Docs to read before sensitive changes
 
