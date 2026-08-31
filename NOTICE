@@ -1,0 +1,12 @@
+Buzz ZCode Harness
+Copyright 2026 Bostonvex
+
+This repository is a modified fork of zcode-acp-server:
+https://github.com/william0wang/zcode-acp
+
+The upstream project and this derivative work are licensed under the Apache
+License, Version 2.0. The upstream Git history and contributor attribution are
+preserved. Fork-specific changes include Buzz custom-harness installation,
+provider-registry compatibility, official MCP authentication fallback, and
+bounded cancellation behavior that prevents cancelled output from reaching
+the ACP client.

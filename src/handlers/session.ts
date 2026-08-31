@@ -1,4 +1,7 @@
 /**
+ * Modified by the buzz-zcode-harness fork in 2026 to silently drain cancelled
+ * turns until the backend confirms termination.
+ *
  * Session lifecycle handlers: initialize, new, list, resume, load, prompt, cancel.
  *
  * These map ACP session methods to ZCode app-server calls. `session/new` is
@@ -923,8 +926,11 @@ export async function setConfigOptionHandler(
  * it eagerly is safe; the loop's `stopSent` guard prevents a second send.
  *
  * `turn.cancelled` is still set so the turn loop switches to its silent-drain
- * path (translate to detect turnDone, but discard every internal event — no
- * text/tool/usage is pushed after the user stopped).
+ * path: it translates only enough to detect the terminal event and discards
+ * every content/tool/usage update. The ACP response is not acknowledged until
+ * the backend confirms the turn ended. A supervising client with a bounded
+ * cancel grace can then kill this process if the backend ignores stop, which
+ * is the only reliable way to prevent a stale model from using inherited tools.
  */
 export async function cancel(
   server: ZcodeAcpServer,
@@ -1042,9 +1048,9 @@ function withPreemptLock(
  *
  * The old turn's runEventTurn ends on its own once it sees a terminal event
  * from the backend (turn.completed/turn.failed after stop). Until then it
- * keeps dispatching whatever the backend sends for this session — which is
- * correct, because within a single session the backend is the single source
- * of truth and its events should reach the client.
+ * silently drains the backend event stream: no cancelled-turn output reaches
+ * the client, and the still-pending ACP response lets the outer supervisor
+ * terminate a backend that ignores stop beyond its cancellation grace.
  *
  * Exported for unit tests (multi-turn pendingTurns scenarios).
  */
@@ -1413,13 +1419,10 @@ async function runEventTurn(
 
     if (turn.cancelled) {
       // Cancel requested: ensure stop was fired (cancel()/preempt normally do
-      // this, but guard anyway). We do NOT silence subsequent events here — if
-      // the backend ignored the stop and kept producing, that content is still
-      // valuable to the user and should be displayed (the backend is the single
-      // source of truth within a session). Cross-turn contamination is handled
-      // separately by the turn-attribution gate below, which discards this
-      // turn's leftover events from the *next* turn's queue. The loop exits
-      // normally on the terminal event (translator.turnDone below).
+      // this, but guard anyway). Keep draining until the backend emits a
+      // terminal event, but suppress every update below. Returning before the
+      // backend actually stops would let a stale model keep using inherited
+      // Buzz credentials after the supervisor believes cancellation succeeded.
       if (!turn.stopSent) {
         stopBackendTurn(server, turn.zcodeSid);
         turn.stopSent = true;
@@ -1529,13 +1532,22 @@ async function runEventTurn(
     // The gate is armed ONLY when this send preempted another prompt. Without
     // preemption no prior-turn residue can exist: the queue can only contain
     // events of a backend-owned turn that was already active at send time
-    // (e.g. the main-branch turn auto-resumed after a compaction) — this send
-    // was steered into it and produces NO new turn.started, so dropping those
-    // events would silently swallow the entire turn's output in the UI.
+    // (e.g. auto-resumed after a compaction) — this send was steered into it
+    // and produces NO new turn.started, so dropping those events would silently
+    // swallow the entire turn's output in the UI.
     if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, preempted)) {
       continue;
     }
     const internalEvents = translator.translate(ev);
+    // A cancelled turn is a silent drain. Translation must continue so the
+    // backend's terminal event can settle the outstanding ACP prompt, but no
+    // text, reasoning, tool, plan, mode, or usage update may reach the client.
+    // If the backend never emits a terminal event, the outer supervisor's
+    // cancel-grace timeout kills this process and its inherited credentials.
+    if (turn.cancelled) {
+      if (translator.turnDone) return { stopReason: "cancelled" };
+      continue;
+    }
     // Capture the turn-start timestamp for the thinking-phase hint above.
     // Done after translate so the flag flip on the turn.started event is
     // observed on the same iteration that processes it.

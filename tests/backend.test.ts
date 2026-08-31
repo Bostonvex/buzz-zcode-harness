@@ -1,4 +1,7 @@
 /**
+ * Modified by the buzz-zcode-harness fork in 2026 with official MCP auth
+ * fallback coverage.
+ *
  * Backend reader-routing logic tests.
  *
  * The routing rules (response correlation, server→client request queueing,
@@ -198,6 +201,37 @@ describe("ZcodeBackend reader routing (unit)", () => {
     // Must stay false so AskUserQuestion keeps flowing through the bridge's
     // interaction path instead of being auto-resolved by the app-server.
     expect(written).toContain('"askUserQuestionAutoResolutionEnabled":false');
+    b.close();
+  });
+
+  it("declines official MCP desktop auth with a schema-valid availability result", () => {
+    const b = makeRoutingSubject();
+    const writes: string[] = [];
+    const stdin = b.proc.stdin;
+    if (!stdin) throw new Error("test backend has no stdin");
+    const origWrite: typeof stdin.write = stdin.write.bind(stdin);
+    stdin.write = ((chunk: unknown, ...args: unknown[]) => {
+      writes.push(String(chunk));
+      return origWrite(chunk as never, ...(args as never[]));
+    }) as typeof stdin.write;
+
+    b.route({
+      id: "mcp-auth-1",
+      method: "interaction/requestOfficialMcpAuthHeaders",
+      params: {
+        requestId: "request-1",
+        workspace: { workspacePath: "/tmp", workspaceKey: "/tmp" },
+        pluginId: "official-example",
+        mcpKey: "example",
+        targetOrigin: "https://example.test",
+      },
+    });
+
+    expect(b.pollServerRequests()).toHaveLength(0);
+    const written = writes.join("");
+    expect(written).toContain('"id":"mcp-auth-1"');
+    expect(written).toContain('"ok":false');
+    expect(written).toContain('"reason":"official_auth_unavailable"');
     b.close();
   });
 

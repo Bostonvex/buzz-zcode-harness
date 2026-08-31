@@ -1,4 +1,7 @@
 /**
+ * Modified by the buzz-zcode-harness fork in 2026 with empty-provider
+ * compatibility coverage.
+ *
  * Tests for provider-registry payload construction.
  *
  * The V4 backend requires `workspace/updateProviderRegistry` to recognise
@@ -6,8 +9,9 @@
  * `provider_not_configured`. These tests lock the payload schema derived from
  * the backend's `j7t` converter in zcode.cjs: apiKey is the inline union
  * `{source:"inline", value}`, apiFormat maps from kind, models is an array of
- * `{modelId}`, and every configured provider is included (registry is NOT
- * enabled-filtered like the dropdown).
+ * `{modelId}`, and every configured provider with at least one model is
+ * included (registry is NOT enabled-filtered like the dropdown). Empty
+ * inactive placeholders are excluded because the backend requires models[1+].
  *
  * All identifiers below are fictional test fixtures — no real provider names,
  * URLs, model ids, or keys are used.
@@ -51,6 +55,13 @@ const FAKE_CONFIG = {
       options: { apiKey: "test-key-two", baseURL: "https://example.test/two" },
       models: { "custom-model-2": { limit: { context: 128000 } } },
     },
+    "builtin:inactive-empty": {
+      name: "Inactive OAuth Placeholder",
+      kind: "anthropic",
+      enabled: false,
+      source: "builtin",
+      models: {},
+    },
   },
 };
 
@@ -72,12 +83,20 @@ function providerById(reg: ReturnType<typeof buildProviderRegistry>, id: string)
 }
 
 describe("buildProviderRegistry", () => {
-  it("includes ALL providers (not enabled-filtered like the dropdown)", () => {
+  it("includes providers with models even when registry is not enabled-filtered", () => {
     const reg = buildProviderRegistry();
     const ids = reg.providers.map((p) => p.providerId);
     expect(ids).toContain("builtin:primary");
     expect(ids).toContain("custom-openai-kind");
     expect(ids).toContain("custom-anthropic-kind");
+  });
+
+  it("omits empty provider placeholders rejected by the strict backend schema", () => {
+    const reg = buildProviderRegistry();
+    expect(providerById(reg, "builtin:inactive-empty")).toBeUndefined();
+    for (const provider of reg.providers) {
+      expect((provider.models as unknown[]).length).toBeGreaterThan(0);
+    }
   });
 
   it("wraps apiKey as the inline union {source:'inline', value}, never a bare string", () => {

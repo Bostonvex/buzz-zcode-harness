@@ -1,19 +1,147 @@
-# zcode-acp-server
+# Buzz ZCode Harness
 
-[![CI](https://github.com/william0wang/zcode-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/william0wang/zcode-acp/actions/workflows/ci.yml)
+[![CI](https://github.com/Bostonvex/buzz-zcode-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Bostonvex/buzz-zcode-harness/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 English | **[简体中文](README.zh-CN.md)**
 
-A standalone [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) server that bridges the headless **ZCode** app-server to ACP-compatible editors such as [Zed](https://zed.dev) and JetBrains IDEs.
+A Buzz-focused [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) harness that bridges the headless **ZCode** app-server to Buzz and other ACP-compatible clients such as [Zed](https://zed.dev) and JetBrains IDEs.
 
 The server launches the ZCode headless app-server (`zcode app-server --stdio`) as a subprocess, translates its internal event stream into ACP `session/update` notifications, and bridges ZCode's interaction channel to ACP — preferring `elicitation/create` when the client supports it, and falling back to `session/request_permission` otherwise — so an editor gets a first-class, native coding-agent experience.
+
+This repository is a modified fork of [william0wang/zcode-acp](https://github.com/william0wang/zcode-acp). It preserves upstream history and the Apache-2.0 license while adding a secret-free Buzz installer and compatibility fixes found through live Buzz testing. See [NOTICE](NOTICE) for the downstream changes.
 
 ## Status
 
 In active development. Core bridging, slash commands and ZCode extensions,
 auto-compaction, remote access for mobile/web clients, and the quota APIs are
 in place; see the project board for what's next.
+
+The Buzz fork additionally:
+
+- omits empty provider placeholders rejected by strict ZCode provider-registry validation;
+- returns a schema-valid unavailable result when official ZCode MCP auth requires the desktop-only credential service;
+- silently drains cancelled turns until ZCode confirms termination, allowing Buzz's bounded cancellation supervisor to kill a backend that ignores stop; and
+- installs and diagnoses a Buzz custom-harness manifest without storing API credentials in that manifest.
+
+## Buzz architecture
+
+```text
+Buzz chat window
+      │ ACP over stdin/stdout
+      ▼
+this bridge ──► zcode app-server --stdio
+                       │ provider protocol configured by ZCode
+                       ▼
+                  model endpoint
+        local │ LAN │ cluster │ container │ cloud
+```
+
+The bridge and the model server are separate layers. Buzz, Node.js, this repository, and the ZCode CLI run on the user's client computer. The model can run on that computer or anywhere ZCode can reach. A cluster does not need ACP software on every worker; it normally exposes one stable inference endpoint to ZCode.
+
+| Model location        | Appropriate when                                          | What this harness needs                                        |
+| --------------------- | --------------------------------------------------------- | -------------------------------------------------------------- |
+| Same computer         | Development, small models, unified workstation            | ZCode configured for the loopback endpoint                     |
+| LAN inference server  | A workstation or dedicated GPU server runs the model      | Reachable hostname/IP, port, and any required key              |
+| Multi-node cluster    | A distributed server shards one model across accelerators | One stable gateway; cluster topology stays behind it           |
+| Containers/Kubernetes | Reproducible, shared, or autoscaled serving               | A published service URL and persistent model cache if required |
+| Hosted provider       | No local serving administration                           | Provider URL, model ID, TLS, and runtime-injected credentials  |
+
+This repository is hardware-neutral. It neither assumes NVIDIA hardware nor embeds a private address, model ID, or provider key. CUDA, ROCm, CPU, Apple Silicon, and hosted accelerators are all deployment choices behind ZCode's configured provider.
+
+## Buzz quick start
+
+### 1. Install and configure ZCode
+
+Install ZCode through its supported distribution. Confirm that the desktop app or CLI can start a normal chat before adding another protocol layer. ZCode owns provider URLs, provider credentials, and its model catalog; this bridge reads that existing configuration.
+
+### 2. Build the bridge
+
+```bash
+git clone https://github.com/Bostonvex/buzz-zcode-harness.git
+cd buzz-zcode-harness
+corepack enable
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+### 3. Stop Buzz and install its harness manifest
+
+If the ZCode CLI is discoverable automatically:
+
+```bash
+node dist/bin/buzz-harness.js install
+```
+
+For a desktop-bundled or custom CLI path:
+
+```bash
+node dist/bin/buzz-harness.js install \
+  --zcode-bin /absolute/path/to/zcode.cjs
+```
+
+An optional seat-wide model override can be supplied by ID:
+
+```bash
+node dist/bin/buzz-harness.js install \
+  --zcode-bin /absolute/path/to/zcode.cjs \
+  --model coding-model
+```
+
+Restart Buzz, add an agent, and select **ZCode** as its harness. Harness registration and individual-agent editing are different operations: use this installer when the executable or seat-wide runtime changes; use Buzz's agent editor for that agent's name, role, and instructions.
+
+Default Buzz data locations are:
+
+| Platform | Default                                     |
+| -------- | ------------------------------------------- |
+| macOS    | `~/Library/Application Support/Buzz`        |
+| Linux    | `$XDG_CONFIG_HOME/Buzz` or `~/.config/Buzz` |
+| Windows  | `%APPDATA%\Buzz`                            |
+
+Pass `--buzz-data-dir /custom/path` to `install`, `doctor`, or `uninstall` if your Buzz build stores custom harnesses elsewhere. Existing manifests are renamed to timestamped backups, never overwritten or deleted.
+
+### 4. Diagnose the installed harness
+
+```bash
+node dist/bin/buzz-harness.js doctor
+```
+
+The doctor reports the manifest path, Node executable, compiled ACP entry point, ZCode executable strategy, and model override. It does not print or inspect provider key values.
+
+### Configuration ownership
+
+| Setting                        | Configure it in                                     | Reason                                        |
+| ------------------------------ | --------------------------------------------------- | --------------------------------------------- |
+| ACP bridge executable          | Buzz harness manifest                               | Buzz launches the bridge                      |
+| ZCode CLI path                 | `ZCODE_BIN` in the Buzz manifest, or auto-discovery | Bridge launches `zcode app-server`            |
+| Model override                 | Optional `ZCODE_MODEL` in the Buzz manifest         | Selects one configured ZCode model            |
+| Provider/base URL              | ZCode configuration                                 | ZCode owns provider behavior and registry     |
+| Provider API key               | ZCode's credential store                            | The generated Buzz manifest stays secret-free |
+| Agent name, role, instructions | Individual agent in Buzz                            | These are seat-specific, not harness-wide     |
+
+Do not copy API keys into the generated JSON. For a custom provider, configure it through ZCode first, confirm it appears in ZCode's model list, and only then select its model ID in Buzz.
+
+### Buzz troubleshooting
+
+**The harness reports no models.** Open ZCode and confirm that at least one configured provider contains at least one model. This fork intentionally omits inactive provider placeholders with empty model maps because the ZCode app-server rejects them. A provider that exists but advertises zero models is not usable.
+
+**A prompt runs but no text reaches the Buzz window.** Set `ZCODE_ACP_DEBUG=1` in the harness environment temporarily, reproduce once, and correlate the Buzz and bridge logs by timestamp. Look for `session/send`, `turn.started`, streaming events, and a terminal `turn.completed` or `turn.failed`. The ACP process must keep stdout exclusively for JSON-RPC; diagnostic output belongs on stderr.
+
+**Cancellation takes about five seconds.** That is expected when the ZCode backend ignores `session/stop`. This fork suppresses all post-cancel output while leaving the ACP prompt pending. Buzz can then enforce its bounded grace period, terminate the bridge and inherited tool credentials, and start a fresh worker. A backend that acknowledges stop normally settles sooner.
+
+**An official MCP integration cannot authenticate.** Official ZCode MCP servers may depend on a proprietary credential service available only to the signed-in desktop host. This external bridge returns `official_auth_unavailable` immediately so the turn does not hang. Configure a user-managed MCP server and its supported credential mechanism instead; do not search ZCode configuration or key stores for private key material.
+
+**The model shown in a historical log differs from today's model.** Compare timestamps with deliberate agent or harness changes before classifying this as configuration drift. `ZCODE_MODEL` is a launch-time override, while individual sessions can also retain or switch model state.
+
+Remove the active Buzz manifest without deleting the bridge or ZCode:
+
+```bash
+node dist/bin/buzz-harness.js uninstall
+```
+
+The command renames the manifest to a recoverable timestamped copy.
 
 ## Requirements
 
@@ -26,8 +154,8 @@ in place; see the project board for what's next.
 ## Install
 
 ```bash
-git clone <repo-url>
-cd zcode-acp-server
+git clone https://github.com/Bostonvex/buzz-zcode-harness.git
+cd buzz-zcode-harness
 pnpm install
 pnpm build
 ```
@@ -437,24 +565,26 @@ recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Privacy
 
-**No telemetry or tracking** — the server reports nothing to anyone. The only
-runtime dependency beyond the ACP SDK is `zod`.
+**No added telemetry or tracking** — the bridge does not introduce a telemetry
+destination. Optional quota and remote-access features are documented above.
 
 Your prompts, code, and file contents are relayed between the editor and the
 ZCode backend over **local pipes**; that data reaches the GLM cloud API only
 because the ZCode backend itself sends it there for inference — this server
 adds no extra destinations.
 
-| Concern     | What & why                                                                                                                                                                                                                        |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network     | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content                                          |
-| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess                                         |
-| Disk        | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
-| Logging     | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged                                                                                                      |
+| Concern     | What & why                                                                                                                                                                                                                                |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network     | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content                                                  |
+| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged or copied into the generated Buzz manifest. OAuth is handled entirely by the ZCode subprocess                            |
+| Disk        | Runtime session sync writes to the existing `~/.zcode/v2/tasks-index.sqlite`. The optional installer writes one Buzz custom-harness manifest and renames previous manifests to timestamped backups; it does not copy provider credentials |
+| Logging     | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged                                                                                                              |
 
 ## License
 
-Apache-2.0. This project follows the same license as the upstream ACP specification.
+Apache-2.0. This fork preserves the license and history of
+[william0wang/zcode-acp](https://github.com/william0wang/zcode-acp); see
+[NOTICE](NOTICE) for the downstream modifications.
 
 ## Disclaimer
 

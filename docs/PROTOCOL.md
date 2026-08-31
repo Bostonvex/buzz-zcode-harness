@@ -1,3 +1,5 @@
+<!-- Modified by the buzz-zcode-harness fork in 2026 to document downstream protocol behavior. -->
+
 # ZCode JSON-RPC Protocol
 
 This document describes the internal JSON-RPC protocol between zcode-acp-server
@@ -936,14 +938,14 @@ over WebSocket (via the machine-level hub) alongside the stdio editor. All
 clients share the same backend sessions; the rules below define how one agent
 serves many clients.
 
-| Aspect                                             | Behaviour                                                                                                                                                                                |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session/update` notifications                     | Broadcast to every connected client. A client that never saw a session (e.g. an editor receiving a phone-created session) simply ignores the update.                                     |
-| `session/request_permission`, `elicitation/create` | Sent to every client; the **first response wins**. Losing requests are aborted, which emits `$/cancel_request` so the losing client dismisses its dialog and replies `RequestCancelled`. |
-| Capabilities                                       | OR-merged across clients at each `initialize` (booleans union, `_meta` shallow-merged). A capability any client declares is enabled for interaction routing.                             |
-| Concurrent `session/prompt` on one session         | Serialized by the per-session preempt lock — identical to the single-client case; a second client's prompt preempts or queues the same way.                                              |
-| `session/cancel`                                   | Affects the shared turn regardless of which client sent it.                                                                                                                              |
-| Process lifetime                                   | Follows the stdio client: when the editor disconnects, the bridge (and every remote attachment) exits. Remote clients never extend the lifetime.                                         |
+| Aspect                                             | Behaviour                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session/update` notifications                     | Broadcast to every connected client. A client that never saw a session (e.g. an editor receiving a phone-created session) simply ignores the update.                                                                                                                                                             |
+| `session/request_permission`, `elicitation/create` | Sent to every client; the **first response wins**. Losing requests are aborted, which emits `$/cancel_request` so the losing client dismisses its dialog and replies `RequestCancelled`.                                                                                                                         |
+| Capabilities                                       | OR-merged across clients at each `initialize` (booleans union, `_meta` shallow-merged). A capability any client declares is enabled for interaction routing.                                                                                                                                                     |
+| Concurrent `session/prompt` on one session         | Serialized by the per-session preempt lock — identical to the single-client case; a second client's prompt preempts or queues the same way.                                                                                                                                                                      |
+| `session/cancel`                                   | Affects the shared turn regardless of which client sent it. The bridge sends backend `session/stop`, silently drains all post-cancel updates, and acknowledges ACP cancellation only after the backend emits a terminal event. A bounded supervisor may kill and restart the bridge if the backend ignores stop. |
+| Process lifetime                                   | Follows the stdio client: when the editor disconnects, the bridge (and every remote attachment) exits. Remote clients never extend the lifetime.                                                                                                                                                                 |
 
 Transport details (hub discovery API, token auth, tunnel notes) live in the
 [Remote Access](../README.md#remote-access) section of the README.

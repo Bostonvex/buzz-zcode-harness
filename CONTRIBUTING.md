@@ -1,8 +1,11 @@
-# Contributing to zcode-acp-server
+# Contributing to Buzz ZCode Harness
 
-Thanks for your interest in contributing! This project bridges the headless
-ZCode app-server to ACP-compatible editors (Zed, JetBrains), and is released
-under the Apache-2.0 license.
+<!-- Modified by the buzz-zcode-harness fork in 2026 for downstream contribution routing. -->
+
+Thanks for your interest in contributing! This attributed fork bridges the
+headless ZCode app-server to Buzz and other ACP-compatible clients, and is
+released under the upstream Apache-2.0 license. Direct repository writes are
+limited to the owner; other contributors should use a fork and pull request.
 
 ## Prerequisites
 
@@ -13,8 +16,8 @@ under the Apache-2.0 license.
 ## Getting Started
 
 ```bash
-git clone <repo-url>
-cd zcode-acp-server
+git clone https://github.com/Bostonvex/buzz-zcode-harness.git
+cd buzz-zcode-harness
 pnpm install
 pnpm run build
 pnpm test
@@ -48,7 +51,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full development guide
   (`./...`). Group with blank lines.
 - **Comments / docs / commit messages**: English only.
 - **Logging**: use the `log()` helper from `src/utils.ts` (writes to stderr —
-   never pollute stdout, which carries the ACP protocol stream).
+  never pollute stdout, which carries the ACP protocol stream).
 
 ## Tests
 
@@ -74,13 +77,15 @@ Where `<type>` is one of: `feat`, `fix`, `refactor`, `chore`, `docs`, `test`,
 punctuation.
 
 Examples:
+
 - `feat: add session/fork extension handler`
 - `fix: flatten todoGroups list so plan replay is not empty`
 - `refactor: extract flattenTodos as a pure helper`
 
 ## Reporting Bugs
 
-Open a [GitHub Issue](https://github.com/william0wang/zcode-acp/issues) with:
+Open a [GitHub Issue](https://github.com/Bostonvex/buzz-zcode-harness/issues) with:
+
 - ZCode CLI version (`zcode --version`)
 - Editor + version (Zed, JetBrains, ...)
 - Node.js version (`node --version`)

@@ -1,4 +1,7 @@
 /**
+ * Modified by the buzz-zcode-harness fork in 2026 to handle official MCP
+ * authentication requests that require unavailable desktop-host services.
+ *
  * ZCode subprocess client: spawn, read-loop multiplexer, async request/response.
  *
  * The ZCode app-server is launched as a subprocess (`zcode app-server --stdio`)
@@ -183,6 +186,19 @@ export class ZcodeBackend {
           nativeSearchEnhancementsEnabled: false,
           memoryEnabled: false,
           askUserQuestionAutoResolutionEnabled: false,
+        });
+      } else if (method === "interaction/requestOfficialMcpAuthHeaders") {
+        // Official ZCode MCP servers can ask the desktop host for proprietary
+        // auth headers. An external ACP bridge has no access to that signed-in
+        // desktop credential service. Reply immediately with the protocol's
+        // schema-valid unavailable result rather than queueing the request for
+        // a turn loop that can only answer it with JSON-RPC method-not-found.
+        // This keeps session setup/turns non-blocking and lets the backend
+        // surface the real availability state.
+        log(`backend: auto-replying ${method} (id=${String(id)}) as unavailable`);
+        this.sendReply(id, {
+          ok: false,
+          reason: "official_auth_unavailable",
         });
       } else {
         this.serverRequests.push({

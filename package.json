@@ -1,17 +1,17 @@
 {
-  "name": "zcode-acp-server",
-  "version": "0.13.0",
-  "description": "Agent Client Protocol (ACP) server bridging headless ZCode to editors like Zed and JetBrains.",
+  "name": "buzz-zcode-harness",
+  "version": "0.13.0-buzz.1",
+  "description": "Buzz-focused ACP bridge for headless ZCode, maintained as an attributed zcode-acp fork.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "ZCode ACP Server Contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/william0wang/zcode-acp.git"
+    "url": "https://github.com/Bostonvex/buzz-zcode-harness.git"
   },
-  "homepage": "https://github.com/william0wang/zcode-acp#readme",
+  "homepage": "https://github.com/Bostonvex/buzz-zcode-harness#readme",
   "bugs": {
-    "url": "https://github.com/william0wang/zcode-acp/issues"
+    "url": "https://github.com/Bostonvex/buzz-zcode-harness/issues"
   },
   "keywords": [
     "acp",
@@ -24,7 +24,8 @@
   ],
   "bin": {
     "zcode-acp": "dist/cli.js",
-    "zcode-acp-server": "dist/cli.js"
+    "zcode-acp-server": "dist/cli.js",
+    "buzz-zcode-harness": "dist/bin/buzz-harness.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,6 +33,7 @@
     "dist",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "docs"
   ],
   "scripts": {

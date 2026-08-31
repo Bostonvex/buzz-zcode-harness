@@ -1,4 +1,7 @@
 /**
+ * Modified by the buzz-zcode-harness fork in 2026 to exclude empty provider
+ * placeholders rejected by the backend's strict registry schema.
+ *
  * Build a provider-registry payload for `workspace/updateProviderRegistry`.
  *
  * The V4 backend doesn't auto-load providers from config.json — the host must
@@ -121,17 +124,19 @@ function buildProviderElement(providerId: string, p: ProviderEntry): Record<stri
 }
 
 /**
- * Build the registry payload from ALL providers in config.json.
+ * Build the registry payload from every usable provider in config.json.
  *
- * Unlike `loadAllModels` (dropdown, enabled-only), the registry pushes every
- * configured provider so the backend recognises any of them when a session
- * switches to it. The backend applies its own enable/availability rules.
+ * Unlike `loadAllModels` (dropdown, enabled-only), the registry includes
+ * disabled providers when they still have models so an existing session can
+ * resolve them. Providers with zero models are omitted: the app-server's
+ * strict registry schema requires `models` to contain at least one item, and
+ * inactive built-in OAuth placeholders commonly have an empty model map.
  */
 export function buildProviderRegistry(): ProviderRegistryPayload {
   const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as ConfigShape;
-  const providers = Object.entries(cfg.provider ?? {}).map(([pid, p]) =>
-    buildProviderElement(pid, p ?? {}),
-  );
+  const providers = Object.entries(cfg.provider ?? {})
+    .filter(([, p]) => Object.keys(p?.models ?? {}).length > 0)
+    .map(([pid, p]) => buildProviderElement(pid, p ?? {}));
   const generatedAt = Date.now();
   // revision is a content hash; the backend skips unchanged revisions. A stable
   // JSON hash over provider ids+kinds+baseURLs is enough — apiKey changes are
@@ -147,7 +152,9 @@ export function buildProviderRegistry(): ProviderRegistryPayload {
 /** Stable short hash over provider ids + kind + baseURL + models (revision gate). */
 function hashRevision(providers: ReadonlyArray<Record<string, unknown>>): string {
   const sig = providers
-    .map((p) => `${p.providerId}|${p.kind ?? ""}|${p.baseURL ?? ""}|${JSON.stringify(p.models ?? [])}`)
+    .map(
+      (p) => `${p.providerId}|${p.kind ?? ""}|${p.baseURL ?? ""}|${JSON.stringify(p.models ?? [])}`,
+    )
     .sort()
     .join("\n");
   // FNV-1a 32-bit → hex; cheap, dependency-free, stable.

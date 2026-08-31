@@ -1,4 +1,7 @@
 /**
+ * Modified by the buzz-zcode-harness fork in 2026 with cancellation
+ * silent-drain coverage.
+ *
  * Tests for the `$/zcode/turnState` out-of-band running indicator emitted by
  * prompt(): running:true when a turn starts, running:false when it ends, and
  * running:true from a preempted turn's finally while the preempting turn is
@@ -14,7 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
-import { prompt } from "../src/handlers/session.js";
+import { cancel, prompt } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
 vi.mock("../src/tasks-index.js", () => ({
@@ -26,17 +29,20 @@ vi.mock("../src/tasks-index.js", () => ({
 function collectCx(): {
   cx: acp.AgentContext;
   turnStates: Array<{ sessionId: string; running: boolean }>;
+  notifications: Array<{ method: string; params: Record<string, unknown> }>;
 } {
   const turnStates: Array<{ sessionId: string; running: boolean }> = [];
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const cx = {
     notify: async (method: string, params: Record<string, unknown>) => {
+      notifications.push({ method, params });
       if (method === "$/zcode/turnState") {
         turnStates.push(params as { sessionId: string; running: boolean });
       }
     },
     request: async () => ({}),
   } as unknown as acp.AgentContext;
-  return { cx, turnStates };
+  return { cx, turnStates, notifications };
 }
 
 /** Fake backend whose session/send delivers `events()` to all listeners. */
@@ -169,5 +175,98 @@ describe("$/zcode/turnState emission", () => {
       { sessionId: "sess_ts", running: true }, // turn 1 exits, still busy
       { sessionId: "sess_ts", running: false }, // turn 2 completes
     ]);
+  });
+
+  it("silently drains late backend output after cancellation", async () => {
+    const listeners: Array<{ handleEvent: (e: ZcodeEvent) => void }> = [];
+    let seq = 0;
+    let sendCount = 0;
+    let stopCount = 0;
+    const emit = (type: ZcodeEvent["type"], payload: Record<string, unknown> = {}) => {
+      const event = { sessionId: "zs_ts", seq: ++seq, type, payload } as ZcodeEvent;
+      for (const listener of listeners) listener.handleEvent(event);
+    };
+    const backend = {
+      isDead: false,
+      request: async (_id: number, method: string) => {
+        switch (method) {
+          case "workspace/updateProviderRegistry":
+          case "session/resume":
+          case "session/subscribe":
+            return { result: {} };
+          case "session/read":
+            return { result: { projection: { status: "running", contextUsed: 0 }, settings: {} } };
+          case "session/messages":
+            return { result: { messages: [] } };
+          case "session/send":
+            sendCount++;
+            emit("turn.started");
+            return { result: { accepted: true } };
+          default:
+            return { error: { message: `unhandled ${method}` } };
+        }
+      },
+      send: (method: string) => {
+        if (method !== "session/stop") return;
+        stopCount++;
+        queueMicrotask(() => {
+          emit("model.streaming", {
+            kind: "text_delta",
+            delta: "stale output must not escape",
+            assistantMessageId: "cancelled-message",
+          });
+        });
+      },
+      pollServerRequests: () => [],
+      registerEventListener: (_sid: string, listener: { handleEvent: (e: ZcodeEvent) => void }) => {
+        listeners.push(listener);
+      },
+      unregisterEventListener: () => {},
+    } as unknown as ZcodeBackend;
+    const server = setup(backend);
+    const { cx, turnStates, notifications } = collectCx();
+
+    const pending = prompt(server, promptParams(), cx, 201);
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.waitFor(() => expect(sendCount).toBe(1));
+    await cancel(server, { sessionId: "sess_ts" } as acp.CancelNotification);
+
+    // Cancellation must remain pending while the backend is still alive, even
+    // after it emits stale content. This gives the outer supervisor's bounded
+    // cancel grace a chance to kill a backend that ignores session/stop.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(settled).toBe(false);
+    expect(JSON.stringify(notifications)).not.toContain("stale output must not escape");
+
+    // Once the backend proves it stopped, the ACP prompt may acknowledge the
+    // cancellation. A success terminal still maps to cancelled because that
+    // was the user's intent.
+    emit("turn.completed", { resultType: "success" });
+    const result = await pending;
+
+    expect(result).toEqual({ stopReason: "cancelled" });
+    expect(stopCount).toBe(1);
+    expect(turnStates).toEqual([
+      { sessionId: "sess_ts", running: true },
+      { sessionId: "sess_ts", running: false },
+    ]);
+    expect(notifications).not.toContainEqual(
+      expect.objectContaining({
+        method: "session/update",
+        params: expect.objectContaining({
+          update: expect.objectContaining({
+            content: expect.objectContaining({ text: "stale output must not escape" }),
+          }),
+        }),
+      }),
+    );
   });
 });
