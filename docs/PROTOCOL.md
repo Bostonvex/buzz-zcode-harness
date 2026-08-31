@@ -955,6 +955,16 @@ outside a foreground `session/prompt` are delivered to clients without being
 misattributed to that prompt. Updates that use the normal live dispatch path
 are observed exactly once.
 
+When both `BUZZ_TELEMETRY_ENABLED=1` and `BUZZ_MODEL_PROXY_ENABLED=1`, the
+bridge may supervise a loopback model timing sidecar. It resolves the configured
+Anthropic base URL before starting the sidecar, injects the listener origin as
+`ZCODE_BASE_URL` only when lazily spawning the backend, and posts normalized
+turn context to the sidecar's authenticated loopback endpoint. Telemetry and
+proxy control variables are removed from the backend environment; model
+credentials are excluded from the proxy's allowlisted environment. Startup
+failure is fail-open to the original upstream. An unexpected active-sidecar
+exit shuts down the bridge so the owning editor can restart the complete tree.
+
 ## Multi-client semantics (remote access)
 
 When `ZCODE_ACP_REMOTE=1` is enabled, the bridge accepts additional ACP clients

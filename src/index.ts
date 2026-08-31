@@ -42,11 +42,18 @@ import { loadEarlier } from "./handlers/replay.js";
 import { resendPendingInteractions } from "./handlers/server-requests.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
 import { loadSkillCommands } from "./config/skill-discovery.js";
+import { loadZcodeCredentials, mergeEnvWithCreds } from "./backend/index.js";
+import { startModelProxySidecar, type ModelProxySidecar } from "./model-proxy-sidecar.js";
 import { trackConnections } from "./remote/broadcast.js";
 import { parseRemoteConfig } from "./remote/config.js";
 import { startRemoteEndpoint, type RemoteEndpointHandle } from "./remote/endpoint.js";
 import { ZcodeAcpServer } from "./server.js";
-import { finishTelemetry, observeClientNotification, withObservedRequest } from "./telemetry.js";
+import {
+  configureTelemetryEnvironment,
+  finishTelemetry,
+  observeClientNotification,
+  withObservedRequest,
+} from "./telemetry.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 
 /**
@@ -71,13 +78,37 @@ function buildAllCommands() {
   return merged;
 }
 
+let activeModelProxy: ModelProxySidecar | null = null;
+
+function environmentFlagEnabled(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase());
+}
+
 export async function main(): Promise<void> {
   // stdout is the outbound channel to the client; stdin is inbound.
   const outbound = Writable.toWeb(process.stdout);
   const inbound = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
   const stream = acp.ndJsonStream(outbound, inbound);
-  const server = new ZcodeAcpServer();
+  const proxyRequested =
+    environmentFlagEnabled(process.env.BUZZ_MODEL_PROXY_ENABLED) &&
+    environmentFlagEnabled(process.env.BUZZ_TELEMETRY_ENABLED);
+  const configuredModelEnvironment = proxyRequested
+    ? mergeEnvWithCreds(loadZcodeCredentials())
+    : process.env;
+  const modelProxy = await startModelProxySidecar({
+    upstreamBaseUrl: configuredModelEnvironment.ZCODE_BASE_URL,
+    model: configuredModelEnvironment.ZCODE_MODEL,
+  });
+  activeModelProxy = modelProxy;
+  configureTelemetryEnvironment({
+    ...process.env,
+    ...(configuredModelEnvironment.ZCODE_MODEL
+      ? { ZCODE_MODEL: configuredModelEnvironment.ZCODE_MODEL }
+      : {}),
+    ...(modelProxy.contextUrl ? { BUZZ_MODEL_PROXY_CONTEXT_URL: modelProxy.contextUrl } : {}),
+  });
+  const server = new ZcodeAcpServer(modelProxy.modelBaseUrl);
 
   // Load all commands once at startup (they don't change mid-session).
   const allCommands = buildAllCommands();
@@ -105,12 +136,18 @@ export async function main(): Promise<void> {
     // the hub's heartbeat TTL also prunes us if this doesn't complete.
     if (remoteHandle) await remoteHandle.stop();
     if (server.backend) await server.backend.close();
-    await finishTelemetry({
-      code: 0,
-      ...(reason.startsWith("SIG") ? { signal: reason } : {}),
-    });
+    await Promise.allSettled([
+      finishTelemetry({
+        code: 0,
+        ...(reason.startsWith("SIG") ? { signal: reason } : {}),
+      }),
+      activeModelProxy?.stop(),
+    ]);
     process.exit(0);
   };
+  activeModelProxy.child?.once("exit", () => {
+    if (!shuttingDown) void shutdown("model proxy exited");
+  });
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
     process.on(sig, () => void shutdown(sig));
   }
@@ -257,7 +294,7 @@ const invokedDirectly = (() => {
 if (invokedDirectly) {
   main().catch(async (err) => {
     warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-    await finishTelemetry({ code: 1 });
+    await Promise.allSettled([finishTelemetry({ code: 1 }), activeModelProxy?.stop()]);
     process.exit(1);
   });
 }

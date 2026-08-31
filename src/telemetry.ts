@@ -17,16 +17,20 @@ const IDENTITY_KEYS = new Set([
 ]);
 
 let activeObserver: AcpObserver | undefined;
+let observerEnvironment: NodeJS.ProcessEnv = process.env;
 
 function observer(): AcpObserver {
   if (!activeObserver) {
-    activeObserver = createAcpObserverFromEnv({
-      harness: "zcode",
-      harnessVersion: AGENT_INFO.version,
-      model: process.env.ZCODE_MODEL ?? process.env.ZCODE_MODEL_ID ?? null,
-      producerName: "buzz-zcode-harness",
-      producerVersion: AGENT_INFO.version,
-    });
+    activeObserver = createAcpObserverFromEnv(
+      {
+        harness: "zcode",
+        harnessVersion: AGENT_INFO.version,
+        model: observerEnvironment.ZCODE_MODEL ?? observerEnvironment.ZCODE_MODEL_ID ?? null,
+        producerName: "buzz-zcode-harness",
+        producerVersion: AGENT_INFO.version,
+      },
+      observerEnvironment,
+    );
   }
   return activeObserver;
 }
@@ -176,6 +180,11 @@ export async function finishTelemetry(details: { code: number; signal?: string }
   } catch {
     // Shutdown must proceed even when the collector is unavailable.
   }
+}
+
+export function configureTelemetryEnvironment(environment: NodeJS.ProcessEnv): void {
+  if (activeObserver) return;
+  observerEnvironment = environment;
 }
 
 /** Test seam for proving native hook placement and fail-open behavior. */

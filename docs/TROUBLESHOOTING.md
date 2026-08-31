@@ -18,6 +18,16 @@ Invalid URLs, missing files, unsafe permissions, collector outages, and
 delivery timeouts disable or drop telemetry without failing ACP requests. Do
 not paste token or salt values into logs or issue reports.
 
+### Model token rate is absent
+
+ACP lifecycle telemetry does not expose provider token timing by itself. For
+Anthropic Messages timing, confirm `BUZZ_MODEL_PROXY_ENABLED=1` and an absolute
+`BUZZ_MODEL_PROXY_BIN` are present alongside the complete telemetry
+configuration. The bridge reads the configured upstream only when proxy mode
+is requested, starts a loopback sidecar, and otherwise keeps credential loading
+lazy. A startup warning means ZCode continued directly, so turns work but exact
+token rate is unavailable. The proxy never receives `ANTHROPIC_API_KEY`.
+
 ### Backend fails to start
 
 **Symptom:**

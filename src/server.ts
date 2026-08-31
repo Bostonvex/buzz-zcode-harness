@@ -17,6 +17,7 @@ import {
 } from "./backend/index.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { enqueueSessionSend } from "./handlers/io.js";
+import { modelChildEnvironment } from "./model-proxy-sidecar.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { AGENT_INFO, PROTOCOL_VERSION, log } from "./utils.js";
 
@@ -56,6 +57,8 @@ export interface PendingTurn {
 export const BACKEND_RESIDENT_TTL_MS = 5 * 60_000;
 
 export class ZcodeAcpServer {
+  constructor(private readonly modelBaseUrl?: string) {}
+
   /** The ZCode subprocess client (lazy — spawned on first use). */
   backend: ZcodeBackend | null = null;
   /** acp_sid → zcode session id (usually identical, but kept for clarity). */
@@ -200,7 +203,7 @@ export class ZcodeAcpServer {
   /** Lazily spawn the zcode backend on first use (initialize doesn't need it). */
   ensureBackend(): ZcodeBackend {
     if (this.backend && !this.backend.isDead) return this.backend;
-    const env = mergeEnvWithCreds(loadZcodeCredentials());
+    const env = modelChildEnvironment(mergeEnvWithCreds(loadZcodeCredentials()), this.modelBaseUrl);
     const argv = resolveZcodeCommand();
     this.backend = new ZcodeBackend(argv, env);
     return this.backend;
