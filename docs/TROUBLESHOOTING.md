@@ -18,6 +18,11 @@ Invalid URLs, missing files, unsafe permissions, collector outages, and
 delivery timeouts disable or drop telemetry without failing ACP requests. Do
 not paste token or salt values into logs or issue reports.
 
+If the dashboard shows an anonymous ZCode agent for each session, add
+`BUZZ_TELEMETRY_AGENT_ID=zcode` and `BUZZ_ACP_DISPLAY_NAME=ZCode` to the Buzz
+custom-harness environment. The observer hashes the identifier before emission;
+the display name is only a presentation label.
+
 ### Model token rate is absent
 
 ACP lifecycle telemetry does not expose provider token timing by itself. For
