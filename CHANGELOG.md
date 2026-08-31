@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional metadata-only Buzz Agent Observability integration at native ACP
+  lifecycle boundaries. It is disabled by default, fail-open, loopback-only,
+  excludes replay/background misattribution, and never captures message or
+  tool content.
 - Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
   bridge the editor uses, including slash-command completion with an
   interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),

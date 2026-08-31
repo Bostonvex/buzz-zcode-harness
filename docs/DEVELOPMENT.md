@@ -31,6 +31,11 @@ pnpm test         # run all tests
 pnpm test:watch   # watch mode
 ```
 
+`tests/telemetry.test.ts` covers the native observability seam: content
+reduction, one-for-one live delivery, observer failure, replay exclusion, and
+background-task exclusion. Keep telemetry calls no-throw and off stdout. A
+change to replay or background routing must preserve those attribution rules.
+
 ### Format
 
 ```bash

@@ -46,6 +46,7 @@ import { trackConnections } from "./remote/broadcast.js";
 import { parseRemoteConfig } from "./remote/config.js";
 import { startRemoteEndpoint, type RemoteEndpointHandle } from "./remote/endpoint.js";
 import { ZcodeAcpServer } from "./server.js";
+import { finishTelemetry, observeClientNotification, withObservedRequest } from "./telemetry.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 
 /**
@@ -104,6 +105,10 @@ export async function main(): Promise<void> {
     // the hub's heartbeat TTL also prunes us if this doesn't complete.
     if (remoteHandle) await remoteHandle.stop();
     if (server.backend) await server.backend.close();
+    await finishTelemetry({
+      code: 0,
+      ...(reason.startsWith("SIG") ? { signal: reason } : {}),
+    });
     process.exit(0);
   };
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
@@ -120,27 +125,51 @@ export async function main(): Promise<void> {
   const app = acp
     .agent({ name: AGENT_INFO.name })
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
-    .onRequest("session/new", async (ctx) => {
-      const result = await newSession(server, ctx.params);
-      sendAvailableCommandsDeferred(server.clients.broadcast(), result.sessionId, allCommands);
-      return result;
-    })
+    .onRequest("session/new", (ctx) =>
+      withObservedRequest("session/new", ctx.requestId as number | string, ctx.params, async () => {
+        const result = await newSession(server, ctx.params);
+        sendAvailableCommandsDeferred(server.clients.broadcast(), result.sessionId, allCommands);
+        return result;
+      }),
+    )
     .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
-    .onRequest("session/resume", async (ctx) => {
-      const result = await resumeSession(server, ctx.params, server.clients.broadcast());
-      sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
-      // A client that (re)connects catches up via resume/load; any interaction
-      // request still waiting for an answer is re-sent to it so a question
-      // fired while it was offline becomes answerable there.
-      resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
-      return result;
-    })
-    .onRequest("session/load", async (ctx) => {
-      const result = await loadSession(server, ctx.params, server.clients.broadcast());
-      sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
-      resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
-      return result;
-    })
+    .onRequest("session/resume", (ctx) =>
+      withObservedRequest(
+        "session/resume",
+        ctx.requestId as number | string,
+        ctx.params,
+        async () => {
+          const result = await resumeSession(server, ctx.params, server.clients.broadcast());
+          sendAvailableCommandsDeferred(
+            server.clients.broadcast(),
+            ctx.params.sessionId,
+            allCommands,
+          );
+          // A client that (re)connects catches up via resume/load; any interaction
+          // request still waiting for an answer is re-sent to it so a question
+          // fired while it was offline becomes answerable there.
+          resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
+          return result;
+        },
+      ),
+    )
+    .onRequest("session/load", (ctx) =>
+      withObservedRequest(
+        "session/load",
+        ctx.requestId as number | string,
+        ctx.params,
+        async () => {
+          const result = await loadSession(server, ctx.params, server.clients.broadcast());
+          sendAvailableCommandsDeferred(
+            server.clients.broadcast(),
+            ctx.params.sessionId,
+            allCommands,
+          );
+          resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
+          return result;
+        },
+      ),
+    )
     // Tail-replay pagination (non-standard; Proposal 0001) — params stay
     // top-level because the parser below is ours, unlike spec methods where
     // bridge extensions must ride in `_meta.zcode`.
@@ -156,18 +185,14 @@ export async function main(): Promise<void> {
     // `data.kind` so clients can hide the quota UI.
     .onRequest("account/usage_stats", z.object({}).passthrough(), () => accountUsageStats())
     .onRequest("session/prompt", (ctx) => {
-      // Mirror the user's message to every other client before the turn
-      // starts — the prompting client renders it locally, the others only
-      // ever see the agent's output.
-      echoUserPromptToOthers(server, ctx.client, ctx.params);
-      // JSON-RPC requests always carry a non-null id; the SDK types it as the
-      // wider JsonRpcId, hence the narrowing cast.
-      return prompt(
-        server,
-        ctx.params,
-        server.clients.broadcast(),
-        ctx.requestId as number | string,
-      );
+      const requestId = ctx.requestId as number | string;
+      return withObservedRequest("session/prompt", requestId, ctx.params, () => {
+        // Mirror the user's message to every other client before the turn
+        // starts — the prompting client renders it locally, the others only
+        // ever see the agent's output.
+        echoUserPromptToOthers(server, ctx.client, ctx.params);
+        return prompt(server, ctx.params, server.clients.broadcast(), requestId);
+      });
     })
     .onRequest("session/set_config_option", (ctx) =>
       setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),
@@ -200,7 +225,10 @@ export async function main(): Promise<void> {
     .onRequest("session/set_mode", extParams, (ctx) =>
       setMode(server, ctx.params, server.clients.broadcast()),
     )
-    .onNotification("session/cancel", (ctx) => cancel(server, ctx.params));
+    .onNotification("session/cancel", (ctx) => {
+      observeClientNotification("session/cancel", ctx.params);
+      return cancel(server, ctx.params);
+    });
 
   // Register broadcast tracking BEFORE connect so the stdio connection is
   // captured, then wire the stdio transport. The same app is later shared
@@ -227,8 +255,9 @@ const invokedDirectly = (() => {
 })();
 
 if (invokedDirectly) {
-  main().catch((err) => {
+  main().catch(async (err) => {
     warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    await finishTelemetry({ code: 1 });
     process.exit(1);
   });
 }

@@ -13,6 +13,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import type { ZcodeAcpServer } from "../server.js";
+import { observeSessionUpdate } from "../telemetry.js";
 import { warn } from "../utils.js";
 
 /**
@@ -24,7 +25,10 @@ export function sendSessionUpdate(
   sessionId: string,
   update: acp.SessionUpdate,
 ): Promise<void> {
-  return enqueueSessionSend(sessionId, () => cx.notify("session/update", { sessionId, update }));
+  return enqueueSessionSend(sessionId, () => {
+    observeSessionUpdate(sessionId, update);
+    return cx.notify("session/update", { sessionId, update });
+  });
 }
 
 /** Per-session replay guard: a FIFO chain of notification sends. */

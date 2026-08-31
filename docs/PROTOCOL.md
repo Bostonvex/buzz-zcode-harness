@@ -931,6 +931,30 @@ event pull, session usage/close, automation, workspace config, MCP/plugins).
 These have no ACP-side counterpart yet. See [`BACKLOG.md`](./BACKLOG.md) for
 the full list and which are candidates for future support.
 
+## Native observability boundary
+
+When `BUZZ_TELEMETRY_ENABLED=1`, the bridge observes the parsed ACP lifecycle at
+native handler boundaries:
+
+- `session/new`, `session/resume`, `session/load`, `session/prompt`, and
+  `session/cancel` are observed at request dispatch;
+- live `session/update` messages are observed inside `sendSessionUpdate`, in
+  the same per-session queue position as their actual client delivery; and
+- process exit is observed before a bounded 50 ms flush.
+
+The adapter reduces messages before handing them to the shared observer.
+Prompt/completion text, reasoning, tool titles/arguments/results, paths,
+arbitrary metadata, and unapproved environment entries are removed. Raw
+session and tool-call identifiers are needed only in process for correlation;
+the observer converts them to salted identifiers before emission.
+
+History replay deliberately calls `cx.notify` directly, bypassing the live
+hook, so reconnecting does not turn historical messages into new activity.
+`notifyByZcodeSid` also bypasses the live hook: background tasks that finish
+outside a foreground `session/prompt` are delivered to clients without being
+misattributed to that prompt. Updates that use the normal live dispatch path
+are observed exactly once.
+
 ## Multi-client semantics (remote access)
 
 When `ZCODE_ACP_REMOTE=1` is enabled, the bridge accepts additional ACP clients

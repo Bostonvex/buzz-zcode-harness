@@ -137,17 +137,18 @@ content-less ToolCallNew.
 
 ## Data & Privacy
 
-**No telemetry, no analytics, no third-party network calls.** The server is a
-local relay: prompts, code, and tool outputs pass through process memory on
-their way between the editor and the ZCode subprocess, but reach the GLM cloud
-API only because the ZCode backend itself sends them for inference.
+The server is a local relay. Optional Buzz Agent Observability telemetry is
+disabled by default and sends only allowlisted lifecycle metadata to a
+loopback collector. Prompts, code, tool arguments/results, paths, arbitrary
+ACP metadata, credentials, and raw identifiers are excluded from stored
+events. Observer failures never affect the relay.
 
-| Concern     | Detail                                                                                                                                                           |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network     | One outbound request in the whole codebase — `src/quota/client.ts` GET to the quota API, Bearer token only, no body                                              |
-| Credentials | API key from `~/.zcode/v2/config.json` (authenticates the subprocess + quota request), never logged. OAuth handled by the ZCode subprocess, not this server      |
-| Disk        | No new files. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — syncs sessions into the ZCode app's history & search (session title + first prompt) |
-| Logging     | `log()`/`warn()` → stderr only for troubleshooting; even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are logged                                               |
+| Concern     | Detail                                                                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Network     | Quota GET, ZCode's configured inference calls, and—only when enabled—metadata batches to the loopback observability collector           |
+| Credentials | Provider key from ZCode config; telemetry token and HMAC salt from separate private files. Values are never logged or emitted as events |
+| Disk        | Session sync writes the existing ZCode task index. The separate collector, not this bridge, owns telemetry persistence                  |
+| Logging     | `log()`/`warn()` use stderr only; telemetry never touches ACP stdout and excludes prompts, code, tool payloads, paths, and keys         |
 
 ## Module Responsibilities
 

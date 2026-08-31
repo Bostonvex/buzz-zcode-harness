@@ -2,6 +2,22 @@
 
 ## Common Issues Quick Reference
 
+### Telemetry is absent but turns still work
+
+This is the intended fail-open behavior. Confirm all of the following:
+
+1. `BUZZ_TELEMETRY_ENABLED=1` is present in the bridge process environment.
+2. `BUZZ_TELEMETRY_TOKEN_FILE` and
+   `BUZZ_TELEMETRY_IDENTITY_SALT_FILE` point to regular, non-symlinked files
+   with mode `0600` or stricter.
+3. The collector is listening on the loopback URL in `BUZZ_TELEMETRY_URL`
+   (default `http://127.0.0.1:7900/api/v1/events`).
+4. The token file belongs to that collector instance.
+
+Invalid URLs, missing files, unsafe permissions, collector outages, and
+delivery timeouts disable or drop telemetry without failing ACP requests. Do
+not paste token or salt values into logs or issue reports.
+
 ### Backend fails to start
 
 **Symptom:**
@@ -67,13 +83,13 @@ a hardcoded version string — read the message text to identify the root cause.
 
 **Common causes:**
 
-| Message fragment                 | Cause                                                                                                                                                                                                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.                                                                                                                                                                                           |
-| `timeout`                        | The per-attempt 5s subscribe deadline elapsed. The bridge retries transient timeouts once (2 attempts total, ~10.5s worst case); if both fail, the backend was unresponsive for that window.                                                               |
-| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).                                                                                                                                                                                     |
-| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                                                                                                                                                                                                          |
-| `Session is not active` (-32004) | The backend evicted the session's resident runtime (idle ~10min, or its LRU cap). The bridge self-heals via `session/resume` (see below).                                                                                                                   |
+| Message fragment                 | Cause                                                                                                                                                                                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.                                                                                                                             |
+| `timeout`                        | The per-attempt 5s subscribe deadline elapsed. The bridge retries transient timeouts once (2 attempts total, ~10.5s worst case); if both fail, the backend was unresponsive for that window. |
+| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).                                                                                                                       |
+| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                                                                                                                                            |
+| `Session is not active` (-32004) | The backend evicted the session's resident runtime (idle ~10min, or its LRU cap). The bridge self-heals via `session/resume` (see below).                                                    |
 
 **`Session is not active` (code -32004) in detail:**
 
