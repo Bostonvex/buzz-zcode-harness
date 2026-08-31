@@ -12,8 +12,8 @@ importers:
         specifier: ^1.3.0
         version: 1.3.0(zod@3.25.76)
       '@buzz-agent-observability/acp-observer':
-        specifier: https://github.com/Bostonvex/buzz-agent-observability/archive/68335d0585904c96f86eb22c63183ef01e7006ab.tar.gz
-        version: https://github.com/Bostonvex/buzz-agent-observability/archive/68335d0585904c96f86eb22c63183ef01e7006ab.tar.gz
+        specifier: https://github.com/Bostonvex/buzz-agent-observability/archive/32a26e209a1a9aef8f62a1de5cfc1027daceb1f2.tar.gz
+        version: https://github.com/Bostonvex/buzz-agent-observability/archive/32a26e209a1a9aef8f62a1de5cfc1027daceb1f2.tar.gz
       chalk:
         specifier: ^6.0.0
         version: 6.0.0
@@ -74,8 +74,8 @@ packages:
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
 
-  '@buzz-agent-observability/acp-observer@https://github.com/Bostonvex/buzz-agent-observability/archive/68335d0585904c96f86eb22c63183ef01e7006ab.tar.gz':
-    resolution: {integrity: sha512-ij3g9yG+b4MDoKXRuQSsOIZsw8rfgTsMq1JpGw2UiLEMXH6MgkQCTZoG7BR1c4DpPEbLBseDyUyWz3GY5K/MlA==, tarball: https://github.com/Bostonvex/buzz-agent-observability/archive/68335d0585904c96f86eb22c63183ef01e7006ab.tar.gz}
+  '@buzz-agent-observability/acp-observer@https://github.com/Bostonvex/buzz-agent-observability/archive/32a26e209a1a9aef8f62a1de5cfc1027daceb1f2.tar.gz':
+    resolution: {integrity: sha512-JcmudR9CUHegyT271yg7CQwzFX2rzP0pq0F13txx72+q1MfDFh7qstz4vlaPBLbMWJw1uXGxwoeFFlbO6JicBw==, tarball: https://github.com/Bostonvex/buzz-agent-observability/archive/32a26e209a1a9aef8f62a1de5cfc1027daceb1f2.tar.gz}
     version: 0.1.0
     engines: {node: '>=22'}
 
@@ -1215,7 +1215,7 @@ snapshots:
     dependencies:
       zod: 3.25.76
 
-  '@buzz-agent-observability/acp-observer@https://github.com/Bostonvex/buzz-agent-observability/archive/68335d0585904c96f86eb22c63183ef01e7006ab.tar.gz': {}
+  '@buzz-agent-observability/acp-observer@https://github.com/Bostonvex/buzz-agent-observability/archive/32a26e209a1a9aef8f62a1de5cfc1027daceb1f2.tar.gz': {}
 
   '@alcalzone/ansi-tokenize@0.3.0':
     dependencies:
