@@ -26,6 +26,7 @@ function observer(): AcpObserver {
         harness: "zcode",
         harnessVersion: AGENT_INFO.version,
         model: observerEnvironment.ZCODE_MODEL ?? observerEnvironment.ZCODE_MODEL_ID ?? null,
+        toolObservationMode: "acp_updates",
         producerName: "buzz-zcode-harness",
         producerVersion: AGENT_INFO.version,
       },

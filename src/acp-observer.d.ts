@@ -11,6 +11,7 @@ declare module "@buzz-agent-observability/acp-observer" {
     harnessVersion?: string;
     model?: string | null;
     endpointId?: string;
+    toolObservationMode?: "acp_updates" | "execution_hook" | "unavailable";
     producerName?: string;
     producerVersion?: string;
   }

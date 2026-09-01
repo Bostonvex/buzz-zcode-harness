@@ -143,6 +143,10 @@ loopback collector. Prompts, code, tool arguments/results, paths, arbitrary
 ACP metadata, credentials, and raw identifiers are excluded from stored
 events. Observer failures never affect the relay.
 
+The native dispatch seam declares `acp_updates` tool observation. This lets
+terminal turns distinguish an observed zero from an unavailable tool count;
+the observer counts unique live tool-call ids and ignores history replay.
+
 | Concern     | Detail                                                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | Network     | Quota GET, ZCode's configured inference calls, and—only when enabled—metadata batches to the loopback observability collector           |

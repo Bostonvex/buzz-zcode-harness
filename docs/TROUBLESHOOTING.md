@@ -23,6 +23,11 @@ If the dashboard shows an anonymous ZCode agent for each session, add
 custom-harness environment. The observer hashes the identifier before emission;
 the display name is only a presentation label.
 
+If the dashboard shows `—` for observed tools on newly completed turns, verify
+the installed observer version supports `toolObservationMode`. This bridge
+declares `acp_updates`; older dependency pins ignore that declaration and
+cannot distinguish an observed zero from unavailable coverage.
+
 ### Model token rate is absent
 
 ACP lifecycle telemetry does not expose provider token timing by itself. For

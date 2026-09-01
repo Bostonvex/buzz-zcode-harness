@@ -955,6 +955,11 @@ outside a foreground `session/prompt` are delivered to clients without being
 misattributed to that prompt. Updates that use the normal live dispatch path
 are observed exactly once.
 
+The bridge declares `toolObservationMode: "acp_updates"` because every live
+tool notification passes through `sendSessionUpdate`. Terminal telemetry may
+therefore publish an observed zero. Consumers must render turns without a
+declared observation mode as unavailable, not as tool-free.
+
 When both `BUZZ_TELEMETRY_ENABLED=1` and `BUZZ_MODEL_PROXY_ENABLED=1`, the
 bridge may supervise a loopback model timing sidecar. It resolves the configured
 Anthropic base URL before starting the sidecar, injects the listener origin as
